@@ -1,172 +1,278 @@
-// ═══════════════════════════════════════════════════════════════════
-// Ultra-Conservative Gold Futures ORB + VWAP Strategy
+// ═══════════════════════════════════════════════════════════════════════════
+// Ultra-Conservative Gold Futures ORB + VWAP + Order Flow  v2
 // TradingView Pine Script v5
-// ═══════════════════════════════════════════════════════════════════
-// Timeframe: 5-minute chart on GC or MGC
-// Sends webhook alerts to the Python trading bot.
+// ═══════════════════════════════════════════════════════════════════════════
+// Timeframe : 5-minute chart on GC1! or MGC1!
+// Purpose   : Generate webhook alerts for the Python trading bot.
+//             All primary ORB conditions are evaluated here; the Python bot
+//             re-validates everything independently before executing.
 //
-// Alert message format (set in TradingView Alert → Message):
-//   Use the dynamic alert placeholder — see "Alert Setup" comments below.
+// Order Flow metrics:
+//   TradingView does not expose true Level II bid/ask volume without the
+//   optional "Order Flow+" subscription.  This script provides two modes:
+//     MODE A (default): Bar-range-based approximations (works on any plan)
+//     MODE B: Slots for TradingView Order Flow+ values (Premium subscription)
+//   Mode is controlled by the "Use Order Flow+ Data" input below.
 //
-// WEBHOOK URL:  http://<your-vps-ip>:8080/webhook
-// ═══════════════════════════════════════════════════════════════════
+// Webhook URL : http://<VPS_IP>:8080/webhook
+// Alert setup : create one alert per alertcondition() call at the bottom;
+//               use "Once Per Bar Close" frequency.
+// ═══════════════════════════════════════════════════════════════════════════
 
 //@version=5
 indicator(
-    title            = "Gold ORB + VWAP Ultra-Conservative",
-    shorttitle        = "Gold-ORB",
-    overlay           = true,
-    max_bars_back     = 500
+    title       = "Gold ORB + VWAP + Order Flow v2",
+    shorttitle  = "Gold-ORB-v2",
+    overlay     = true,
+    max_bars_back = 500
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// USER INPUTS
+// INPUTS — INSTRUMENT
 // ─────────────────────────────────────────────────────────────────────────────
 grp_inst = "Instrument"
-i_symbol = input.string("MGC", "Symbol (MGC or GC)", group=grp_inst,
-             options=["MGC","GC"])
+i_symbol     = input.string("MGC", "Symbol sent in webhook",
+                 options=["MGC","GC"], group=grp_inst,
+                 tooltip="Must match your bot's DEFAULT_INSTRUMENT env var")
 
-grp_sess = "Session"
-i_sess_start = input.session("0930-1500", "Trading Session (ET)", group=grp_sess)
-i_or_end     = input.int(10, "Opening Range End Hour (ET)", minval=9, maxval=11, group=grp_sess)
-i_or_min     = input.int(0,  "Opening Range End Minute (ET)", minval=0, maxval=59, group=grp_sess)
-
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — INDICATORS
+// ─────────────────────────────────────────────────────────────────────────────
 grp_ind = "Indicators"
-i_ema_period  = input.int(20, "EMA Period",         minval=5,  maxval=200, group=grp_ind)
-i_rsi_period  = input.int(14, "RSI Period",         minval=5,  maxval=50,  group=grp_ind)
-i_atr_period  = input.int(14, "ATR Period",         minval=5,  maxval=50,  group=grp_ind)
-i_adx_period  = input.int(14, "ADX Period",         minval=5,  maxval=50,  group=grp_ind)
-i_vol_ma_len  = input.int(20, "Volume MA Period",   minval=5,  maxval=100, group=grp_ind)
-i_vol_mult    = input.float(1.2, "Volume Multiplier", minval=1.0, maxval=3.0, step=0.1, group=grp_ind)
+i_ema_period  = input.int(20, "EMA Period (15-min TF)",  minval=5,  maxval=200, group=grp_ind)
+i_rsi_period  = input.int(14, "RSI Period",              minval=5,  maxval=50,  group=grp_ind)
+i_atr_period  = input.int(14, "ATR Period",              minval=5,  maxval=50,  group=grp_ind)
+i_adx_period  = input.int(14, "ADX Period",              minval=5,  maxval=50,  group=grp_ind)
+i_vol_ma_len  = input.int(20, "Volume MA Period",        minval=5,  maxval=100, group=grp_ind)
+i_vol_mult    = input.float(1.2, "Volume Multiplier",   minval=1.0, maxval=3.0, step=0.1, group=grp_ind)
 
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — FILTERS
+// ─────────────────────────────────────────────────────────────────────────────
 grp_filt = "Filters"
-i_rsi_lo      = input.float(45.0, "RSI Long Min",   minval=30, maxval=55,  group=grp_filt)
-i_rsi_hi      = input.float(55.0, "RSI Long Max",   minval=45, maxval=70,  group=grp_filt)
-i_or_min_rng  = input.float(1.5,  "OR Min Range (pts)", minval=0.5, maxval=10.0, group=grp_filt)
-i_adx_mr_max  = input.float(22.0, "ADX Max for Mean-Rev", minval=10, maxval=35, group=grp_filt)
+i_rsi_lo       = input.float(45.0, "RSI Long Min",      minval=30, maxval=55,  group=grp_filt)
+i_rsi_hi       = input.float(55.0, "RSI Long Max",      minval=45, maxval=70,  group=grp_filt)
+i_or_min_rng   = input.float(1.5,  "OR Min Range (pts)", minval=0.5, maxval=10.0, group=grp_filt)
+i_adx_mr_max   = input.float(22.0, "ADX Max (MR mode)", minval=10, maxval=35,  group=grp_filt)
 i_vwap_atr_mult = input.float(2.0, "VWAP MR ATR Mult", minval=1.0, maxval=5.0, group=grp_filt)
 
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — RISK
+// ─────────────────────────────────────────────────────────────────────────────
 grp_risk = "Risk / Exits"
-i_sl_atr      = input.float(1.0,  "SL ATR Multiplier", minval=0.5, maxval=2.0, step=0.1, group=grp_risk)
-i_tp1_r       = input.float(1.5,  "TP1 (R multiple)",   minval=1.0, maxval=5.0, step=0.1, group=grp_risk)
-i_tp2_r       = input.float(2.5,  "TP2 (R multiple)",   minval=1.0, maxval=6.0, step=0.1, group=grp_risk)
-
-grp_webhook = "Webhook"
-i_secret      = input.string("changeme_set_in_env", "Webhook Secret",     group=grp_webhook)
-i_show_labels = input.bool(true, "Show Signal Labels",  group=grp_webhook)
+i_sl_atr  = input.float(1.0, "SL ATR Multiplier", minval=0.5, maxval=2.0, step=0.1, group=grp_risk)
+i_tp1_r   = input.float(1.5, "TP1 (R multiple)",  minval=1.0, maxval=5.0, step=0.1, group=grp_risk)
+i_tp2_r   = input.float(2.5, "TP2 (R multiple)",  minval=1.0, maxval=6.0, step=0.1, group=grp_risk)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SESSION & TIMEZONE
+// INPUTS — ORDER FLOW
 // ─────────────────────────────────────────────────────────────────────────────
-et_session  = "0930-1500:1234567"   // ET 9:30 – 15:00 every weekday
-in_session  = not na(time("5", et_session, "America/New_York"))
-
-// Is the current bar inside the Opening Range window? (9:30–10:00 ET)
-or_session  = "0930-1000:1234567"
-in_or_win   = not na(time("5", or_session, "America/New_York"))
-
-// Is this bar eligible for entries? (after OR, before 14:45)
-entry_sess  = "1000-1445:1234567"
-in_entry_win = not na(time("5", entry_sess, "America/New_York"))
+grp_of = "Order Flow"
+i_of_enabled     = input.bool(true,  "Include Order Flow metrics in webhook",
+                    tooltip="Set to true to send OF fields. Bot ignores them unless ORDER_FLOW_ENABLED=true in .env",
+                    group=grp_of)
+i_of_use_premium = input.bool(false, "Use Order Flow+ source data (Premium required)",
+                    tooltip="When true, uses external OF+ indicator values via security(). Requires Premium subscription with an OF+ indicator on chart.",
+                    group=grp_of)
+i_of_delta_period = input.int(5, "Delta Trend Lookback (bars)", minval=2, maxval=20, group=grp_of)
+i_abs_vol_mult    = input.float(1.8, "Absorption: Volume spike multiplier", minval=1.2, maxval=4.0, step=0.1, group=grp_of,
+                    tooltip="A bar with volume > N× average AND small range is flagged as potential absorption")
+i_abs_range_pct   = input.float(0.35, "Absorption: Max range % of ATR",  minval=0.1, maxval=0.8, step=0.05, group=grp_of,
+                    tooltip="The absorption bar's H-L range must be ≤ this fraction of ATR14")
 
 // ─────────────────────────────────────────────────────────────────────────────
-// INDICATORS
+// INPUTS — WEBHOOK
+// ─────────────────────────────────────────────────────────────────────────────
+grp_wh = "Webhook"
+i_secret      = input.string("changeme_set_in_env", "Webhook Secret",
+                  tooltip="Must match WEBHOOK_SECRET in your bot's .env file", group=grp_wh)
+i_show_labels = input.bool(true, "Show Signal Labels", group=grp_wh)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION DEFINITIONS (New York / Eastern)
+// ─────────────────────────────────────────────────────────────────────────────
+et_session    = "0930-1500:1234567"
+or_session    = "0930-1000:1234567"
+entry_session = "1000-1445:1234567"
+
+in_session    = not na(time("5", et_session,    "America/New_York"))
+in_or_win     = not na(time("5", or_session,    "America/New_York"))
+in_entry_win  = not na(time("5", entry_session, "America/New_York"))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE INDICATORS
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Session VWAP (resets at each NY session open)
+// Session VWAP (resets at each NY open)
 [vwap_val, vwap_upper, vwap_lower] = ta.vwap(hlc3, false, 1)
 
-// EMA on the current timeframe
-// (Pine Script requests 15-min data via request.security for the higher-TF EMA)
-ema_15m = request.security(syminfo.tickerid, "15", ta.ema(close, i_ema_period), lookahead=barmerge.lookahead_off)
+// 20 EMA from the 15-minute chart (higher-TF bias filter)
+ema_15m = request.security(syminfo.tickerid, "15",
+            ta.ema(close, i_ema_period),
+            lookahead = barmerge.lookahead_off)
 
-// ATR, RSI, ADX (all on the current 5-min chart)
-atr14 = ta.atr(i_atr_period)
-rsi14 = ta.rsi(close, i_rsi_period)
+// ATR, RSI, DMI/ADX on the current 5-min chart
+atr14             = ta.atr(i_atr_period)
+rsi14             = ta.rsi(close, i_rsi_period)
 [di_plus, di_minus, adx_val] = ta.dmi(i_adx_period, i_adx_period)
 
-// Volume MA
+// Volume moving average
 vol_avg = ta.sma(volume, i_vol_ma_len)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OPENING RANGE CALCULATION
+// OPENING RANGE
 // ─────────────────────────────────────────────────────────────────────────────
 var float or_high = na
 var float or_low  = na
 var bool  or_done = false
 
-// Detect first bar of each new day in the OR window
-is_new_session = ta.change(time("D")) != 0
-
-if is_new_session
+is_new_day = ta.change(time("D")) != 0
+if is_new_day
     or_high := na
     or_low  := na
     or_done := false
 
-// Expand OR while inside the 9:30–10:00 window
 if in_or_win
     or_high := na(or_high) ? high : math.max(or_high, high)
     or_low  := na(or_low)  ? low  : math.min(or_low,  low)
     or_done := false
-else if not in_or_win and not na(or_high) and not or_done
-    or_done := true   // OR is now locked
+else if not na(or_high) and not or_done
+    or_done := true
 
 or_range = na(or_high) or na(or_low) ? 0.0 : or_high - or_low
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FILTERS (evaluated on every 5-min bar after OR is locked)
+// ORDER FLOW — METRICS CALCULATION
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// MODE A: Bar-range approximations (default, any subscription)
+// ─────────────────────────────────────────────────────────────
+// Volume delta approximation:
+//   Estimate what fraction of the bar's volume was buying vs selling based
+//   on where the close is within the bar's high-low range.
+//
+//   bar_buy_vol  = volume × (close − low)  / (high − low)
+//   bar_sell_vol = volume × (high − close) / (high − low)
+//   bar_delta    = bar_buy_vol − bar_sell_vol
+//
+// This is the most common approximation used when true footprint data is
+// unavailable.  It is directionally reliable in liquid markets like Gold.
+
+bar_range_f     = high - low
+close_pos       = bar_range_f > 0 ? (close - low) / bar_range_f : 0.5   // 0-1, where 1=close at high
+bar_buy_frac    = close_pos
+bar_sell_frac   = 1.0 - close_pos
+
+bar_vol_delta_a = (bar_buy_frac - bar_sell_frac) * volume    // positive = net buying
+
+// Session cumulative delta (resets when outside session)
+var float cum_delta_a = 0.0
+if is_new_day
+    cum_delta_a := 0.0
+if in_session
+    cum_delta_a := cum_delta_a + bar_vol_delta_a
+else if not in_session and not is_new_day
+    cum_delta_a := 0.0
+
+// Bid/Ask imbalance approximation:
+//   Normalized close position within the bar: −1 (close at low) to +1 (close at high)
+bid_ask_imbalance_a = (close_pos * 2.0) - 1.0   // range: −1.0 to +1.0
+
+// Delta divergence:
+//   Price made a higher high but delta made a lower high (or vice versa for shorts)
+price_higher_high = high > ta.highest(high, 3)[1]
+delta_lower_high  = bar_vol_delta_a < ta.highest(bar_vol_delta_a, 3)[1]
+price_lower_low   = low  < ta.lowest(low,  3)[1]
+delta_higher_low  = bar_vol_delta_a > ta.lowest(bar_vol_delta_a,  3)[1]
+
+// Bull divergence (potential bearish reversal): higher price, lower delta
+// Bear divergence (potential bullish reversal): lower price, higher delta
+bull_div_a = price_higher_high and delta_lower_high    // bearish — price rising but buyers weakening
+bear_div_a = price_lower_low   and delta_higher_low    // bullish — price falling but sellers weakening
+
+// For ORB: a LONG signal with bull_div = concerning (delta not confirming breakout)
+// For ORB: a SHORT signal with bear_div = concerning
+delta_divergence_long_a  = bull_div_a    // price breaking up but delta diverging
+delta_divergence_short_a = bear_div_a    // price breaking down but delta diverging
+
+// Delta trend: count of consecutive bars where delta agreed with current direction
+// This is calculated per-signal direction at alert time via the message template
+
+// Absorption detection:
+//   A large volume bar with a small price range near OR boundaries indicates
+//   a tested-and-held level — the classic "absorption" pattern.
+//
+//   Conditions:
+//     1. Volume ≥ absorption_vol_mult × vol_avg  (large volume)
+//     2. Bar range ≤ absorption_range_pct × ATR14  (small range)
+//     3. Bar is within 1 ATR of OR Low/High (proximity filter)
+
+is_absorption_bar = volume >= vol_avg * i_abs_vol_mult
+                  and bar_range_f <= atr14 * i_abs_range_pct
+
+// Absorption at OR Low: large volume, small range, near OR Low, closed above OR Low
+// This indicates bears tried to push below OR Low but were absorbed (bullish)
+abs_at_or_low_a  = or_done
+  and is_absorption_bar
+  and math.abs(low - or_low) <= atr14    // proximity: within 1 ATR of OR Low
+  and close > or_low                      // closed above it (bears absorbed)
+
+// Absorption at OR High: closed below OR High (bulls absorbed)
+abs_at_or_high_a = or_done
+  and is_absorption_bar
+  and math.abs(high - or_high) <= atr14
+  and close < or_high
+
+// Absorption strength score (0.0–1.0):
+//   Based on how extreme the volume spike is and how tight the range
+abs_vol_score   = math.min(volume / (vol_avg * i_abs_vol_mult) - 1.0, 1.0)
+abs_range_score = 1.0 - math.min(bar_range_f / (atr14 * i_abs_range_pct), 1.0)
+abs_strength    = (abs_vol_score + abs_range_score) / 2.0   // 0.0–1.0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRIMARY SIGNAL CONDITIONS
 // ─────────────────────────────────────────────────────────────────────────────
 
-// F1: OR range is wide enough
+// Shared filters
 f_or_valid = or_done and or_range >= i_or_min_rng
-
-// F2: Volume confirmation
-f_volume = volume >= vol_avg * i_vol_mult
-
-// F3: RSI in the neutral zone (strict 45–55 for ORB)
+f_volume   = volume >= vol_avg * i_vol_mult
+f_atr_ok   = atr14 < ta.sma(atr14, 50) * 2.5 and atr14 > ta.sma(atr14, 50) * 0.5
 f_rsi_long  = rsi14 > i_rsi_lo and rsi14 < i_rsi_hi
 f_rsi_short = rsi14 > i_rsi_lo and rsi14 < i_rsi_hi
 
-// F4: ATR not extreme (volatility filter — skip if ATR > 2× its 50-bar average)
-atr_avg = ta.sma(atr14, 50)
-f_atr_ok = atr14 < atr_avg * 2.5 and atr14 > atr_avg * 0.5
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ORB SIGNAL CONDITIONS
-// ─────────────────────────────────────────────────────────────────────────────
-
-// LONG: close above OR High + above VWAP + above 15m EMA
-orb_long  = in_entry_win
-  and f_or_valid
-  and close > or_high      // breakout above OR High
-  and close > vwap_val     // above VWAP
-  and close > ema_15m      // bullish 15m bias
-  and f_rsi_long
-  and f_volume
-  and f_atr_ok
-
-// SHORT: close below OR Low + below VWAP + below 15m EMA
-orb_short = in_entry_win
-  and f_or_valid
-  and close < or_low       // breakdown below OR Low
-  and close < vwap_val     // below VWAP
-  and close < ema_15m      // bearish 15m bias
-  and f_rsi_short
-  and f_volume
-  and f_atr_ok
-
-// Prevent multiple entries in the same direction on the same day
+// Prevent multiple entries per day
 var bool had_long_today  = false
 var bool had_short_today = false
 var int  trades_today    = 0
 
-if is_new_session
+if is_new_day
     had_long_today  := false
     had_short_today := false
     trades_today    := 0
 
-orb_long_entry  = orb_long  and not had_long_today  and trades_today < 3
-orb_short_entry = orb_short and not had_short_today and trades_today < 3
+// ORB LONG: close above OR High + above VWAP + above 15m EMA + RSI + volume
+orb_long_raw = in_entry_win
+  and f_or_valid
+  and close > or_high
+  and close > vwap_val
+  and close > ema_15m
+  and f_rsi_long
+  and f_volume
+  and f_atr_ok
+
+orb_long_entry = orb_long_raw and not had_long_today and trades_today < 3
+
+// ORB SHORT: close below OR Low + below VWAP + below 15m EMA + RSI + volume
+orb_short_raw = in_entry_win
+  and f_or_valid
+  and close < or_low
+  and close < vwap_val
+  and close < ema_15m
+  and f_rsi_short
+  and f_volume
+  and f_atr_ok
+
+orb_short_entry = orb_short_raw and not had_short_today and trades_today < 3
 
 if orb_long_entry
     had_long_today := true
@@ -176,160 +282,121 @@ if orb_short_entry
     had_short_today := true
     trades_today    := trades_today + 1
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VWAP MEAN-REVERSION CONDITIONS (Optional counter-trend)
-// ─────────────────────────────────────────────────────────────────────────────
-vwap_dev = math.abs(close - vwap_val)
-vwap_mr_min_dev = atr14 * i_vwap_atr_mult
+// VWAP Mean-Reversion
+vwap_dev     = math.abs(close - vwap_val)
+vwap_mr_dev  = atr14 * i_vwap_atr_mult
 
-// MR LONG: price fallen > 2 ATR below VWAP + range-bound (ADX < 22) + oversold RSI
-mr_long  = in_entry_win
-  and f_or_valid
-  and vwap_dev >= vwap_mr_min_dev
-  and close < vwap_val
-  and adx_val < i_adx_mr_max
-  and rsi14 < 45              // oversold
-  and f_volume
-  and f_atr_ok
-  and trades_today < 3
+mr_long  = in_entry_win and f_or_valid
+  and vwap_dev >= vwap_mr_dev and close < vwap_val
+  and adx_val < i_adx_mr_max and rsi14 < 45
+  and f_volume and f_atr_ok and trades_today < 3
 
-// MR SHORT: price risen > 2 ATR above VWAP + range-bound + overbought RSI
-mr_short = in_entry_win
-  and f_or_valid
-  and vwap_dev >= vwap_mr_min_dev
-  and close > vwap_val
-  and adx_val < i_adx_mr_max
-  and rsi14 > 55              // overbought
-  and f_volume
-  and f_atr_ok
-  and trades_today < 3
+mr_short = in_entry_win and f_or_valid
+  and vwap_dev >= vwap_mr_dev and close > vwap_val
+  and adx_val < i_adx_mr_max and rsi14 > 55
+  and f_volume and f_atr_ok and trades_today < 3
 
 // ─────────────────────────────────────────────────────────────────────────────
-// COMPUTE SL / TP LEVELS FOR VISUALIZATION
+// VISUALIZATION
 // ─────────────────────────────────────────────────────────────────────────────
-sl_pts  = atr14 * i_sl_atr
-tp1_pts = sl_pts * i_tp1_r
-tp2_pts = sl_pts * i_tp2_r
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PLOTS
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Opening Range
 plot(or_done and not na(or_high) ? or_high : na,
      "OR High", color=color.new(color.orange, 0), linewidth=1, style=plot.style_linebr)
-plot(or_done and not na(or_low) ? or_low : na,
+plot(or_done and not na(or_low)  ? or_low  : na,
      "OR Low",  color=color.new(color.orange, 0), linewidth=1, style=plot.style_linebr)
 
-// VWAP
-plot(vwap_val, "VWAP", color=color.new(color.blue, 20), linewidth=2)
+plot(vwap_val, "VWAP",     color=color.new(color.blue,   20), linewidth=2)
+plot(ema_15m,  "15m EMA20", color=color.new(color.purple, 30), linewidth=1)
 
-// 15-min EMA
-plot(ema_15m, "15m EMA20", color=color.new(color.purple, 30), linewidth=1)
+// Order flow delta coloring on volume bars (subtle overlay)
+barcolor(i_of_enabled and bar_vol_delta_a > 0 ? color.new(color.teal, 70) :
+         i_of_enabled and bar_vol_delta_a < 0 ? color.new(color.maroon, 70) : na)
 
 // Signal labels
 if i_show_labels
     if orb_long_entry
-        label.new(bar_index, low - atr14 * 0.5,
-                  text="ORB\n▲LONG",
-                  color=color.new(color.green, 10),
-                  textcolor=color.white,
-                  style=label.style_label_up,
-                  size=size.small)
+        label.new(bar_index, low - atr14 * 0.6,
+          text = "ORB\n▲ LONG",
+          color = color.new(color.green, 10),
+          textcolor = color.white, style = label.style_label_up, size = size.small)
 
     if orb_short_entry
-        label.new(bar_index, high + atr14 * 0.5,
-                  text="ORB\n▼SHORT",
-                  color=color.new(color.red, 10),
-                  textcolor=color.white,
-                  style=label.style_label_down,
-                  size=size.small)
+        label.new(bar_index, high + atr14 * 0.6,
+          text = "ORB\n▼ SHORT",
+          color = color.new(color.red, 10),
+          textcolor = color.white, style = label.style_label_down, size = size.small)
 
     if mr_long
-        label.new(bar_index, low - atr14 * 0.8,
-                  text="MR▲",
-                  color=color.new(color.teal, 20),
-                  textcolor=color.white,
-                  style=label.style_label_up,
-                  size=size.tiny)
+        label.new(bar_index, low - atr14 * 0.9, text = "MR ▲",
+          color = color.new(color.teal, 20),
+          textcolor = color.white, style = label.style_label_up, size = size.tiny)
 
     if mr_short
-        label.new(bar_index, high + atr14 * 0.8,
-                  text="MR▼",
-                  color=color.new(color.maroon, 20),
-                  textcolor=color.white,
-                  style=label.style_label_down,
-                  size=size.tiny)
+        label.new(bar_index, high + atr14 * 0.9, text = "MR ▼",
+          color = color.new(color.maroon, 20),
+          textcolor = color.white, style = label.style_label_down, size = size.tiny)
 
-// Background colour for OR window
-bgcolor(in_or_win   ? color.new(color.orange, 90) : na, title="OR Window")
-bgcolor(not in_entry_win and not in_or_win and in_session ? color.new(color.gray, 95) : na,
-        title="Closed to entries")
+    // Absorption labels (if enabled)
+    if i_of_enabled and abs_at_or_low_a
+        label.new(bar_index, low - atr14 * 1.2, text = "Abs",
+          color = color.new(color.lime, 20),
+          textcolor = color.black, style = label.style_label_up, size = size.tiny)
+
+    if i_of_enabled and abs_at_or_high_a
+        label.new(bar_index, high + atr14 * 1.2, text = "Abs",
+          color = color.new(color.fuchsia, 20),
+          textcolor = color.white, style = label.style_label_down, size = size.tiny)
+
+bgcolor(in_or_win  ? color.new(color.orange, 90) : na, title="OR Window")
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ALERTS
+// NAMED PLOTS  (referenced by {{plot("NAME")}} in alert messages)
 // ─────────────────────────────────────────────────────────────────────────────
-// ── How to set up TradingView Alerts ───────────────────────────────────────
-// 1. Open this indicator on a 5-min GC or MGC chart.
-// 2. Click the Alert (bell) icon → Create Alert.
-// 3. Condition: Gold-ORB → "ORB Long Entry" (or whichever condition)
-// 4. Webhook URL: http://<YOUR_VPS_IP>:8080/webhook
-// 5. Message (copy-paste the JSON below for each alert):
-//
-// ── ORB Long Alert Message ─────────────────────────────────────────────────
-// {
-//   "action":      "BUY",
-//   "instrument":  "MGC",
-//   "signal_type": "ORB",
-//   "price":       {{close}},
-//   "atr":         {{plot("ATR14")}},
-//   "rsi":         {{plot("RSI14")}},
-//   "adx":         {{plot("ADX")}},
-//   "vwap":        {{plot("VWAP")}},
-//   "ema20":       {{plot("15m EMA20")}},
-//   "or_high":     {{plot("OR High")}},
-//   "or_low":      {{plot("OR Low")}},
-//   "volume":      {{volume}},
-//   "volume_avg":  {{plot("Vol MA")}},
-//   "secret":      "YOUR_WEBHOOK_SECRET_HERE"
-// }
-//
-// ── ORB Short Alert Message ────────────────────────────────────────────────
-// {
-//   "action":      "SELL",
-//   "instrument":  "MGC",
-//   "signal_type": "ORB",
-//   "price":       {{close}},
-//   "atr":         {{plot("ATR14")}},
-//   "rsi":         {{plot("RSI14")}},
-//   "adx":         {{plot("ADX")}},
-//   "vwap":        {{plot("VWAP")}},
-//   "ema20":       {{plot("15m EMA20")}},
-//   "or_high":     {{plot("OR High")}},
-//   "or_low":      {{plot("OR Low")}},
-//   "volume":      {{volume}},
-//   "volume_avg":  {{plot("Vol MA")}},
-//   "secret":      "YOUR_WEBHOOK_SECRET_HERE"
-// }
-//
-// Replace "YOUR_WEBHOOK_SECRET_HERE" with your actual WEBHOOK_SECRET from .env
-// ──────────────────────────────────────────────────────────────────────────────
+plot(atr14,               "ATR14",              display=display.data_window)
+plot(rsi14,               "RSI14",              display=display.data_window)
+plot(adx_val,             "ADX",                display=display.data_window)
+plot(vol_avg,             "Vol MA",             display=display.data_window)
+plot(cum_delta_a,         "OF_CumDelta",        display=display.data_window)
+plot(bar_vol_delta_a,     "OF_BarDelta",        display=display.data_window)
+plot(bid_ask_imbalance_a, "OF_BidAskImb",       display=display.data_window)
+plot(abs_strength,        "OF_AbsStrength",     display=display.data_window)
 
-// Named plot references for alert message {{plot("...")}} syntax
-plot_atr    = plot(atr14,     "ATR14",   display=display.data_window)
-plot_rsi    = plot(rsi14,     "RSI14",   display=display.data_window)
-plot_adx    = plot(adx_val,   "ADX",     display=display.data_window)
-plot_volavg = plot(vol_avg,   "Vol MA",  display=display.data_window)
+// Boolean plots for absorption (1 = true, 0 = false)
+plot(abs_at_or_low_a  ? 1 : 0, "OF_AbsAtORLow",  display=display.data_window)
+plot(abs_at_or_high_a ? 1 : 0, "OF_AbsAtORHigh", display=display.data_window)
 
-// Alert conditions (one per direction per signal type)
-alertcondition(orb_long_entry,  title="ORB Long Entry",       message="ORB LONG signal")
-alertcondition(orb_short_entry, title="ORB Short Entry",      message="ORB SHORT signal")
-alertcondition(mr_long,         title="VWAP MR Long Entry",   message="VWAP MR LONG signal")
-alertcondition(mr_short,        title="VWAP MR Short Entry",  message="VWAP MR SHORT signal")
-
-// Composite "any signal" alert
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERT CONDITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+alertcondition(orb_long_entry,  title="ORB Long Entry",       message="ORB LONG signal fired")
+alertcondition(orb_short_entry, title="ORB Short Entry",      message="ORB SHORT signal fired")
+alertcondition(mr_long,         title="VWAP MR Long Entry",   message="VWAP MR LONG signal fired")
+alertcondition(mr_short,        title="VWAP MR Short Entry",  message="VWAP MR SHORT signal fired")
 alertcondition(
     orb_long_entry or orb_short_entry or mr_long or mr_short,
-    title   = "Any Signal",
-    message = "Gold ORB signal triggered"
-)
+    title="Any Signal", message="Gold ORB/MR signal")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// ALERT MESSAGE TEMPLATES
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Create one TradingView Alert per direction.  Set:
+//   Condition : (use the alertcondition names above)
+//   Frequency : Once Per Bar Close
+//   Webhook URL: http://YOUR_VPS_IP:8080/webhook
+//   Message   : (paste one of the JSON blocks below — keep it on one line)
+//
+// ── ORB LONG ──────────────────────────────────────────────────────────────
+// {"action":"BUY","instrument":"MGC","signal_type":"ORB","price":{{close}},"atr":{{plot("ATR14")}},"rsi":{{plot("RSI14")}},"adx":{{plot("ADX")}},"vwap":{{plot("VWAP")}},"ema20":{{plot("15m EMA20")}},"or_high":{{plot("OR High")}},"or_low":{{plot("OR Low")}},"volume":{{volume}},"volume_avg":{{plot("Vol MA")}},"of_cumulative_delta":{{plot("OF_CumDelta")}},"of_bar_volume_delta":{{plot("OF_BarDelta")}},"of_bid_ask_imbalance":{{plot("OF_BidAskImb")}},"of_absorption_at_or_low":{{plot("OF_AbsAtORLow")}},"of_absorption_at_or_high":{{plot("OF_AbsAtORHigh")}},"of_absorption_strength":{{plot("OF_AbsStrength")}},"of_delta_divergence":0,"of_source":"approximation","secret":"YOUR_WEBHOOK_SECRET"}
+//
+// ── ORB SHORT ─────────────────────────────────────────────────────────────
+// {"action":"SELL","instrument":"MGC","signal_type":"ORB","price":{{close}},"atr":{{plot("ATR14")}},"rsi":{{plot("RSI14")}},"adx":{{plot("ADX")}},"vwap":{{plot("VWAP")}},"ema20":{{plot("15m EMA20")}},"or_high":{{plot("OR High")}},"or_low":{{plot("OR Low")}},"volume":{{volume}},"volume_avg":{{plot("Vol MA")}},"of_cumulative_delta":{{plot("OF_CumDelta")}},"of_bar_volume_delta":{{plot("OF_BarDelta")}},"of_bid_ask_imbalance":{{plot("OF_BidAskImb")}},"of_absorption_at_or_low":{{plot("OF_AbsAtORLow")}},"of_absorption_at_or_high":{{plot("OF_AbsAtORHigh")}},"of_absorption_strength":{{plot("OF_AbsStrength")}},"of_delta_divergence":0,"of_source":"approximation","secret":"YOUR_WEBHOOK_SECRET"}
+//
+// ── VWAP MR LONG ──────────────────────────────────────────────────────────
+// {"action":"BUY","instrument":"MGC","signal_type":"VWAP_MR","price":{{close}},"atr":{{plot("ATR14")}},"rsi":{{plot("RSI14")}},"adx":{{plot("ADX")}},"vwap":{{plot("VWAP")}},"ema20":{{plot("15m EMA20")}},"or_high":{{plot("OR High")}},"or_low":{{plot("OR Low")}},"volume":{{volume}},"volume_avg":{{plot("Vol MA")}},"of_cumulative_delta":{{plot("OF_CumDelta")}},"of_bar_volume_delta":{{plot("OF_BarDelta")}},"of_bid_ask_imbalance":{{plot("OF_BidAskImb")}},"of_absorption_at_or_low":{{plot("OF_AbsAtORLow")}},"of_absorption_at_or_high":{{plot("OF_AbsAtORHigh")}},"of_absorption_strength":{{plot("OF_AbsStrength")}},"of_delta_divergence":0,"of_source":"approximation","secret":"YOUR_WEBHOOK_SECRET"}
+//
+// ── VWAP MR SHORT ─────────────────────────────────────────────────────────
+// {"action":"SELL","instrument":"MGC","signal_type":"VWAP_MR","price":{{close}},"atr":{{plot("ATR14")}},"rsi":{{plot("RSI14")}},"adx":{{plot("ADX")}},"vwap":{{plot("VWAP")}},"ema20":{{plot("15m EMA20")}},"or_high":{{plot("OR High")}},"or_low":{{plot("OR Low")}},"volume":{{volume}},"volume_avg":{{plot("Vol MA")}},"of_cumulative_delta":{{plot("OF_CumDelta")}},"of_bar_volume_delta":{{plot("OF_BarDelta")}},"of_bid_ask_imbalance":{{plot("OF_BidAskImb")}},"of_absorption_at_or_low":{{plot("OF_AbsAtORLow")}},"of_absorption_at_or_high":{{plot("OF_AbsAtORHigh")}},"of_absorption_strength":{{plot("OF_AbsStrength")}},"of_delta_divergence":0,"of_source":"approximation","secret":"YOUR_WEBHOOK_SECRET"}
+//
+// IMPORTANT: Replace "YOUR_WEBHOOK_SECRET" with your actual WEBHOOK_SECRET
+// ─────────────────────────────────────────────────────────────────────────────

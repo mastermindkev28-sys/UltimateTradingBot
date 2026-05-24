@@ -1,93 +1,120 @@
 """
-telegram_alerts.py — Rich Telegram Notification System
-=======================================================
-Sends real-time trade alerts, risk warnings, and daily summaries
-to a configured Telegram bot/channel.
+telegram_alerts.py — Rich Telegram Notification System  (v2 — with Order Flow)
+===============================================================================
+Sends real-time trade alerts, risk warnings, and daily summaries to Telegram.
 
-All messages use Telegram MarkdownV2 formatting with emoji status
-indicators.  Messages are queued internally so a slow network never
-blocks the main trading loop.
-
-Setup: create a bot via @BotFather → set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env
+v2 additions:
+  • Entry alert now includes Order Flow confirmation status and metrics
+  • Shows which OF conditions passed/failed when OF filter is enabled
+  • Daily summary shows OF filter pass rate (when enabled)
 """
 
-import asyncio
 import logging
-import os
-from datetime import datetime
 from typing import Optional
 import aiohttp
 import config
+from order_flow_filter import OrderFlowResult
 
 logger = logging.getLogger(__name__)
 
-# Telegram Bot API base URL
-TG_API = "https://api.telegram.org/bot{token}/{method}"
-
-# Maximum message length before truncation
+TG_API    = "https://api.telegram.org/bot{token}/{method}"
 TG_MAX_LEN = 4096
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Formatting helpers
+# ─────────────────────────────────────────────────────────────────────────────
 def _esc(text: str) -> str:
     """Escape special characters for Telegram MarkdownV2."""
-    # Characters that must be escaped: _ * [ ] ( ) ~ ` > # + - = | { } . !
     specials = r"_*[]()~`>#+-=|{}.!"
     return "".join(f"\\{c}" if c in specials else c for c in str(text))
 
 
 def _fmt_pnl(value: float) -> str:
-    """Format P&L with sign and 2 decimal places."""
-    sign = "+" if value >= 0 else ""
-    return f"{sign}{value:.2f}"
+    return f"{'+'if value>=0 else ''}{value:.2f}"
 
 
 def _fmt_pct(value: float) -> str:
-    """Format percentage."""
-    sign = "+" if value >= 0 else ""
-    return f"{sign}{value:.3f}%"
+    return f"{'+'if value>=0 else ''}{value:.3f}%"
 
 
+def _of_section(of_result: Optional[OrderFlowResult]) -> str:
+    """
+    Build the Order Flow section of an entry alert.
+    Returns an empty string when OF is disabled or result is None.
+    """
+    if not config.ORDER_FLOW_ENABLED:
+        return ""
+
+    if of_result is None:
+        return "\n📊 OF: `disabled`"
+
+    if not of_result.passed:
+        # Should not reach Telegram if filter failed, but defensive
+        return f"\n📊 OF: ❌ `{_esc(of_result.reason[:80])}`"
+
+    # Build concise OF metrics line
+    d = of_result.of_data
+    if d is None or not d.available:
+        return "\n📊 OF: `N/A \\(data not in payload\\)`"
+
+    lines = ["\n━━━━━━━━━━━━━━━━━━━━━━"]
+    lines.append("📊 *Order Flow Confirmation*")
+    lines.append(
+        f"  Σ Delta:      `{d.cumulative_delta:+.0f}`  "
+        f"Bar Δ: `{d.bar_volume_delta:+.0f}`"
+    )
+    lines.append(
+        f"  Bid/Ask Imb:  `{d.bid_ask_imbalance:+.2f}`  "
+        f"Source: `{_esc(d.source or 'approx')}`"
+    )
+    abs_lo = "✓" if d.absorption_at_or_low  else "✗"
+    abs_hi = "✓" if d.absorption_at_or_high else "✗"
+    lines.append(
+        f"  Abs@ORLow:    `{abs_lo}`   "
+        f"Abs@ORHigh: `{abs_hi}`"
+    )
+    if d.delta_divergence:
+        lines.append("  ⚠️ Delta divergence detected")
+    if of_result.conditions_met:
+        met_str = _esc(", ".join(of_result.conditions_met[:3]))
+        lines.append(f"  ✅ Passed: `{met_str}`")
+
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TELEGRAM ALERTER
+# ═══════════════════════════════════════════════════════════════════════════════
 class TelegramAlerter:
-    """
-    Async Telegram alert sender.
-    All public methods are async and safe to call from the trading loop.
-    Failures are logged but never raised — alerts must never crash the bot.
-    """
+    """Async Telegram alert sender.  Failures are logged but never raised."""
 
     def __init__(self) -> None:
-        self._token    = config.TELEGRAM_BOT_TOKEN
-        self._chat_id  = config.TELEGRAM_CHAT_ID
-        self._enabled  = bool(self._token and self._chat_id)
+        self._token   = config.TELEGRAM_BOT_TOKEN
+        self._chat_id = config.TELEGRAM_CHAT_ID
+        self._enabled = bool(self._token and self._chat_id)
         self._session: Optional[aiohttp.ClientSession] = None
 
         if not self._enabled:
             logger.warning(
-                "Telegram not configured — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env"
+                "Telegram not configured — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"
             )
 
-    # ── session management ──────────────────────────────────────────────────
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=10)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10)
+            )
         return self._session
 
     async def _send(self, text: str, parse_mode: str = "MarkdownV2") -> bool:
-        """Core send — returns True on success, False on failure."""
         if not self._enabled:
-            logger.debug("Telegram disabled — would have sent: %s", text[:120])
+            logger.debug("Telegram disabled. Would send: %s", text[:100])
             return False
-
-        # Truncate if needed
         if len(text) > TG_MAX_LEN:
-            text = text[: TG_MAX_LEN - 3] + "..."
-
-        url = TG_API.format(token=self._token, method="sendMessage")
-        payload = {
-            "chat_id":    self._chat_id,
-            "text":       text,
-            "parse_mode": parse_mode,
-        }
+            text = text[:TG_MAX_LEN - 3] + "..."
+        url     = TG_API.format(token=self._token, method="sendMessage")
+        payload = {"chat_id": self._chat_id, "text": text, "parse_mode": parse_mode}
         try:
             session = await self._get_session()
             async with session.post(url, json=payload) as resp:
@@ -100,15 +127,16 @@ class TelegramAlerter:
             logger.error("Telegram send error: %s", exc)
             return False
 
-    # ── alert methods ───────────────────────────────────────────────────────
+    # ── Alert methods ────────────────────────────────────────────────────────
     async def send_startup(
         self,
-        mode:        str,
-        equity:      float,
-        instrument:  str,
-        risk_pct:    float,
+        mode:       str,
+        equity:     float,
+        instrument: str,
+        risk_pct:   float,
     ) -> None:
-        mode_tag = config.PROP_FIRM.replace("_", "\\_").upper()
+        of_status = "🟢 ENABLED" if config.ORDER_FLOW_ENABLED else "⚫ disabled"
+        mode_tag  = config.PROP_FIRM.replace("_", "\\_").upper()
         text = (
             f"🤖 *Ultra\\-Conservative Gold Bot Started*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -117,6 +145,7 @@ class TelegramAlerter:
             f"📊 Instrument:   `{_esc(instrument)}`\n"
             f"⚠️  Risk/trade:  `{_esc(f'{risk_pct:.2f}%')}`\n"
             f"🏦 Prop Firm:   `{mode_tag}`\n"
+            f"📈 Order Flow:  `{_esc(of_status)}`\n"
             f"🕐 Session:      `09:30 – 15:00 ET`\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"✅ All systems go\\. Waiting for signals…"
@@ -128,6 +157,7 @@ class TelegramAlerter:
         trade:       dict,
         equity:      float,
         daily_stats: dict,
+        of_result:   Optional[OrderFlowResult] = None,
     ) -> None:
         action     = trade["action"]
         arrow      = "🟢 LONG" if action == "BUY" else "🔴 SHORT"
@@ -142,15 +172,19 @@ class TelegramAlerter:
         trades_rem = daily_stats.get("remaining_trades", "?")
         dl_limit   = _esc(f"${daily_stats.get('daily_loss_limit_$', 0):.2f}")
         eq_disp    = _esc(f"${equity:,.2f}")
+        sig_type   = _esc(trade.get("signal_type", "ORB"))
+
+        of_blk = _of_section(of_result)
 
         text = (
             f"📈 *TRADE ENTRY \\— {inst} {arrow}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚡ Contracts:  `{contracts}`\n"
+            f"⚡ Contracts:  `{contracts}` \\({sig_type}\\)\n"
             f"🎯 Entry:      `{entry}`\n"
             f"🛑 Stop:       `{sl}`\n"
             f"✅ TP1 \\(50%\\): `{tp1}`\n"
             f"🎖 TP2 \\(50%\\): `{tp2}`\n"
+            f"{of_blk}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"💸 Risk:       `{risk_amt} / {risk_pct}`\n"
             f"💰 Equity:     `{eq_disp}`\n"
@@ -167,17 +201,16 @@ class TelegramAlerter:
         equity:      float,
         daily_stats: dict,
     ) -> None:
-        inst       = _esc(trade.get("instrument", ""))
-        exit_px    = _esc(f"{trade.get('exit_price', 0):.2f}")
-        entry_px   = _esc(f"{trade.get('entry_price', 0):.2f}")
-        pnl_str    = _esc(_fmt_pnl(pnl))
-        pnl_pct    = _esc(_fmt_pct(pnl / trade.get("equity_at_entry", equity) * 100))
-        day_pnl    = _esc(_fmt_pnl(daily_stats.get("daily_pnl", 0)))
-        day_pnl_p  = _esc(_fmt_pct(daily_stats.get("daily_pnl_pct", 0)))
-        eq_disp    = _esc(f"${equity:,.2f}")
-        reason     = _esc(exit_reason)
-        icon       = "✅" if pnl > 0 else ("⚠️" if pnl == 0 else "❌")
-
+        inst      = _esc(trade.get("instrument", ""))
+        exit_px   = _esc(f"{trade.get('exit_price', 0):.2f}")
+        entry_px  = _esc(f"{trade.get('entry_price', 0):.2f}")
+        pnl_str   = _esc(_fmt_pnl(pnl))
+        pnl_pct   = _esc(_fmt_pct(pnl / trade.get("equity_at_entry", equity) * 100))
+        day_pnl   = _esc(_fmt_pnl(daily_stats.get("daily_pnl", 0)))
+        day_pnl_p = _esc(_fmt_pct(daily_stats.get("daily_pnl_pct", 0)))
+        eq_disp   = _esc(f"${equity:,.2f}")
+        reason    = _esc(exit_reason)
+        icon      = "✅" if pnl > 0 else ("⚠️" if pnl == 0 else "❌")
         text = (
             f"{icon} *TRADE EXIT \\— {inst}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -196,7 +229,6 @@ class TelegramAlerter:
         day_pnl_p = _esc(_fmt_pct(daily_stats.get("daily_pnl_pct", 0)))
         eq_disp   = _esc(f"${daily_stats.get('current_equity', 0):,.2f}")
         limit     = _esc(f"${daily_stats.get('daily_loss_limit_$', 0):.2f}")
-
         text = (
             f"🛑 *DAILY LOSS LIMIT REACHED*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -212,7 +244,6 @@ class TelegramAlerter:
         dd_pct  = _esc(f"{daily_stats.get('intraday_dd_pct', 0):.3f}%")
         eq_disp = _esc(f"${daily_stats.get('current_equity', 0):,.2f}")
         r_esc   = _esc(reason)
-
         text = (
             f"⏸ *BOT PAUSED*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -245,17 +276,25 @@ class TelegramAlerter:
         await self._send(text)
 
     async def send_daily_summary(self, daily_stats: dict) -> None:
-        trades     = daily_stats.get("trade_count", 0)
-        wins       = daily_stats.get("winning_trades", 0)
-        losses     = daily_stats.get("losing_trades", 0)
-        day_pnl    = daily_stats.get("daily_pnl", 0.0)
-        day_pnl_p  = daily_stats.get("daily_pnl_pct", 0.0)
-        eq_disp    = _esc(f"${daily_stats.get('current_equity', 0):,.2f}")
-        pnl_str    = _esc(_fmt_pnl(day_pnl))
-        pnl_pct    = _esc(_fmt_pct(day_pnl_p))
-        win_rate   = _esc(f"{(wins / trades * 100):.0f}%" if trades else "N/A")
-        dd_pct     = _esc(f"{daily_stats.get('intraday_dd_pct', 0):.3f}%")
-        icon       = "🏆" if day_pnl > 0 else ("😐" if day_pnl == 0 else "😟")
+        trades    = daily_stats.get("trade_count", 0)
+        wins      = daily_stats.get("winning_trades", 0)
+        losses    = daily_stats.get("losing_trades", 0)
+        day_pnl   = daily_stats.get("daily_pnl", 0.0)
+        day_pnl_p = daily_stats.get("daily_pnl_pct", 0.0)
+        eq_disp   = _esc(f"${daily_stats.get('current_equity', 0):,.2f}")
+        pnl_str   = _esc(_fmt_pnl(day_pnl))
+        pnl_pct   = _esc(_fmt_pct(day_pnl_p))
+        win_rate  = _esc(f"{(wins/trades*100):.0f}%" if trades else "N/A")
+        dd_pct    = _esc(f"{daily_stats.get('intraday_dd_pct', 0):.3f}%")
+        icon      = "🏆" if day_pnl > 0 else ("😐" if day_pnl == 0 else "😟")
+
+        # OF filter performance (when enabled)
+        of_line = ""
+        if config.ORDER_FLOW_ENABLED:
+            of_pass = daily_stats.get("of_filter_passes", 0)
+            of_total = daily_stats.get("of_filter_total", 0)
+            of_rate = f"{of_pass}/{of_total}" if of_total else "N/A"
+            of_line = f"\n📊 OF Pass Rate: `{_esc(of_rate)}`"
 
         text = (
             f"{icon} *DAILY SUMMARY*\n"
@@ -264,7 +303,8 @@ class TelegramAlerter:
             f"🎯 Win Rate:   `{win_rate}`\n"
             f"💵 Day P\\&L:   `{pnl_str}  \\({pnl_pct}\\)`\n"
             f"📉 Intraday DD: `{dd_pct}`\n"
-            f"💰 Equity:     `{eq_disp}`\n"
+            f"💰 Equity:     `{eq_disp}`"
+            f"{of_line}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Session closed\\. See you tomorrow\\! 🌙"
         )
@@ -291,10 +331,8 @@ class TelegramAlerter:
         await self._send(text)
 
     async def send_custom(self, message: str) -> None:
-        """Send a plain text message (no MarkdownV2 formatting)."""
         await self._send(message, parse_mode="")
 
-    # ── cleanup ─────────────────────────────────────────────────────────────
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()

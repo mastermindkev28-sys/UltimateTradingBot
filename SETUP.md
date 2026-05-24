@@ -1,6 +1,6 @@
-# UltimateTradingBot — Complete Setup Guide
+# UltimateTradingBot v2 — Complete Setup Guide
 
-**Ultra-Conservative Gold Futures Trading Bot | ORB + VWAP | Tradovate + TradingView**
+**Ultra-Conservative Gold Futures Bot | ORB + VWAP + Optional Order Flow | Tradovate + TradingView**
 
 ---
 
@@ -13,13 +13,13 @@
 5. [VPS Deployment](#5-vps-deployment)
 6. [Environment Configuration](#6-environment-configuration)
 7. [TradingView Pine Script Setup](#7-tradingview-pine-script-setup)
-8. [Running the Bot](#8-running-the-bot)
-9. [Prop Firm Configuration](#9-prop-firm-configuration)
-10. [Emergency Procedures](#10-emergency-procedures)
-11. [Daily Workflow](#11-daily-workflow)
-12. [Risk Management Reference](#12-risk-management-reference)
-13. [Troubleshooting](#13-troubleshooting)
-
+8. [Order Flow Filter Setup](#8-order-flow-filter-setup)
+9. [Running the Bot](#9-running-the-bot)
+10. [Prop Firm Configuration](#10-prop-firm-configuration)
+11. [Emergency Procedures](#11-emergency-procedures)
+12. [Daily Workflow](#12-daily-workflow)
+13. [Risk Management Reference](#13-risk-management-reference)
+14. [Troubleshooting](#14-troubleshooting)
 ---
 
 ## 1. Architecture Overview
@@ -27,30 +27,32 @@
 ```
 TradingView (5-min GC/MGC chart)
     │
-    │  Pine Script generates signal
-    │  when all conditions are met
+    │  Pine Script: ORB conditions + Order Flow metrics
+    │  fires webhook when all primary conditions met
     ▼
-POST /webhook  (JSON payload)
+POST /webhook  (JSON payload with optional of_* fields)
     │
     ▼
 Python Bot (your VPS)
-    ├── Webhook Server (FastAPI)       ← receives the signal
-    ├── Strategy Validator             ← re-validates every condition
-    ├── News Filter                    ← blocks near high-impact events
-    ├── Risk Manager                   ← sizes position, enforces limits
-    ├── Tradovate Client (REST+WS)     ← places bracket orders
-    └── Telegram Alerter               ← sends you real-time notifications
+    ├── Webhook Server (FastAPI)        ← receives the signal
+    ├── Strategy Validator              ← re-validates ORB/VWAP conditions
+    ├── Order Flow Filter  [OPTIONAL]  ← cumulative delta, absorption, imbalance
+    ├── News Filter                     ← blocks near high-impact events
+    ├── Risk Manager                    ← sizes position, enforces all limits
+    ├── Tradovate Client (REST+WS)      ← places bracket orders
+    └── Telegram Alerter                ← rich alerts with OF confirmation status
 ```
 
-**Signal flow for a typical LONG entry:**
+**Signal flow for a typical LONG entry (Order Flow enabled):**
 
 1. TradingView bar closes above OR High with VWAP/EMA/RSI/Volume confirmation
-2. Pine Script fires webhook alert → `POST /webhook` with JSON payload
-3. Bot validates: session time ✓ | not paused ✓ | news clear ✓ | strategy ✓
-4. Bot sizes position: 0.30% risk / ATR-adjusted SL → e.g. 2 MGC contracts
-5. Tradovate receives bracket order: Entry(Market) + TP1(Limit) + SL(Stop)
-6. Telegram sends entry notification with full details
-7. Monitor loop watches equity every 10 seconds for time stops / loss limits
+2. Pine Script calculates OF metrics (volume delta, absorption, imbalance)
+3. Webhook fires → `POST /webhook` with primary + OF fields in JSON payload
+4. Bot validates: session ✓ | news clear ✓ | strategy ✓ | **OF filter ✓**
+5. Bot sizes position: 0.30% risk / ATR-adjusted SL → e.g. 2 MGC contracts
+6. Tradovate receives bracket order: Entry(Market) + TP1(Limit) + SL(Stop)
+7. Telegram sends entry notification with OF confirmation details
+8. Monitor loop watches equity every 10 seconds for time stops / loss limits
 
 ---
 
@@ -326,36 +328,18 @@ Create **4 separate alerts** (one per signal type):
 
 #### Alert 2 — ORB Short
 
-Same as above but `"action": "SELL"` and condition: **ORB Short Entry**
+Same as Alert 1 but `"action": "SELL"` and condition: **ORB Short Entry**
 
-#### Alert 3 — VWAP MR Long
+#### Alert 3 — VWAP MR Long / Short
 
-```json
-{
-  "action":      "BUY",
-  "instrument":  "MGC",
-  "signal_type": "VWAP_MR",
-  "price":       {{close}},
-  "atr":         {{plot("ATR14")}},
-  "rsi":         {{plot("RSI14")}},
-  "adx":         {{plot("ADX")}},
-  "vwap":        {{plot("VWAP")}},
-  "ema20":       {{plot("15m EMA20")}},
-  "or_high":     {{plot("OR High")}},
-  "or_low":      {{plot("OR Low")}},
-  "volume":      {{volume}},
-  "volume_avg":  {{plot("Vol MA")}},
-  "secret":      "YOUR_WEBHOOK_SECRET_HERE"
-}
-```
+Use `"signal_type": "VWAP_MR"` with `"action": "BUY"` or `"SELL"`.
+All other fields identical.  Note: OF filter is NOT applied to VWAP MR trades.
 
-#### Alert 4 — VWAP MR Short
+> ⚠️ **Important:** Replace `YOUR_WEBHOOK_SECRET` in every alert message with your actual `WEBHOOK_SECRET` from `.env`
 
-Same with `"action": "SELL"` and condition: **VWAP MR Short Entry**
+**For the full webhook JSON templates including Order Flow fields, see the comment block at the bottom of `pine_script/gold_orb_strategy.pine`.**
 
-> ⚠️ **Important:** Replace `YOUR_WEBHOOK_SECRET_HERE` in every alert message with your actual secret from `.env`
-
-### Step 4: Test the Webhook
+### Step 4: Test the Webhook (without Order Flow)
 
 ```bash
 curl -X POST http://YOUR_VPS_IP:8080/webhook \
@@ -378,11 +362,127 @@ curl -X POST http://YOUR_VPS_IP:8080/webhook \
   }'
 ```
 
+### Step 4b: Test the Webhook (with Order Flow fields)
+
+```bash
+curl -X POST http://YOUR_VPS_IP:8080/webhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "BUY",
+    "instrument": "MGC",
+    "signal_type": "ORB",
+    "price": 1950.5,
+    "atr": 3.2,
+    "rsi": 51.0,
+    "adx": 18.5,
+    "vwap": 1948.0,
+    "ema20": 1947.5,
+    "or_high": 1949.0,
+    "or_low": 1944.0,
+    "volume": 2500,
+    "volume_avg": 1800,
+    "of_cumulative_delta": 1250.5,
+    "of_bar_volume_delta": 320.0,
+    "of_bid_ask_imbalance": 0.35,
+    "of_absorption_at_or_low": 1,
+    "of_absorption_at_or_high": 0,
+    "of_absorption_strength": 0.72,
+    "of_delta_divergence": 0,
+    "of_source": "approximation",
+    "secret": "YOUR_WEBHOOK_SECRET_HERE"
+  }'
+```
+
 Expected response: `{"status":"accepted"}`
 
 ---
 
-## 8. Running the Bot
+## 8. Order Flow Filter Setup
+
+> **Philosophy:** Order flow is a second-layer confirmation filter, never the primary signal source. It is designed to eliminate low-probability breakouts while keeping the strategy simple and reliable.
+
+### What "Order Flow" Means in This Bot
+
+| Metric | What it measures | Data source |
+|---|---|---|
+| Cumulative Delta | Net buying vs selling for the whole session | Volume delta sum |
+| Bar Volume Delta | Net buying on the specific breakout bar | Volume × close position |
+| Bid/Ask Imbalance | Bid vs ask pressure (-1 to +1 scale) | Close position in range |
+| Absorption at OR Low | Bears tested below OR Low but failed | Wick + volume analysis |
+| Absorption at OR High | Bulls tested above OR High but failed | Wick + volume analysis |
+| Delta Divergence | Price moving opposite to delta | Price vs delta comparison |
+
+### Data Quality Notes
+
+| Mode | Quality | Requirement |
+|---|---|---|
+| Bar-range approximation | ⭐⭐⭐ (good directional signal) | Any TradingView plan |
+| TradingView Order Flow+ | ⭐⭐⭐⭐⭐ (true bid/ask volume) | Premium + OF+ subscription |
+| Tradovate Time & Sales | ⭐⭐⭐⭐⭐ (exchange-direct) | Available via Tradovate API |
+
+The Pine Script defaults to bar-range approximations (Mode A).  This is
+sufficient for directional confirmation in liquid Gold futures.
+
+### Recommended Roll-Out Sequence
+
+**Phase 1 — Baseline (weeks 1–2)**
+```env
+ORDER_FLOW_ENABLED=false
+```
+Run normally. Build a baseline dataset of signal quality without OF.
+
+**Phase 2 — Soft Filter (weeks 3–4)**
+```env
+ORDER_FLOW_ENABLED=true
+OF_REQUIRE_POSITIVE_DELTA=true
+OF_REQUIRE_BAR_DELTA=true
+OF_ALLOW_MISSING_DATA=true
+```
+Enable only the two most reliable conditions. Allow missing data so
+no signal is blocked if TradingView doesn't send OF fields.
+
+**Phase 3 — Full Confirmation (after 30+ signals with OF data)**
+```env
+ORDER_FLOW_ENABLED=true
+OF_REQUIRE_POSITIVE_DELTA=true
+OF_REQUIRE_BAR_DELTA=true
+OF_REQUIRE_NO_DIVERGENCE=true
+OF_ALLOW_MISSING_DATA=false
+```
+Now require OF data. Add divergence filter. Review logs to decide
+whether absorption adds value for your specific market conditions.
+
+### Order Flow in Telegram Alerts
+
+When `ORDER_FLOW_ENABLED=true`, entry alerts include:
+
+```
+📊 Order Flow Confirmation
+  Σ Delta:      +1250   Bar Δ: +320
+  Bid/Ask Imb:  +0.35   Source: approximation
+  Abs@ORLow:    ✓       Abs@ORHigh: ✗
+  ✅ Passed: CumDelta=+1250 > +0, BarDelta=+320 > +0
+```
+
+When the filter is disabled, the OF section is omitted from alerts.
+
+### Upgrading to True Order Flow Data
+
+For true footprint/delta data without approximations:
+
+1. **TradingView Order Flow+** (requires Premium subscription)
+   - Add a "Volume Profile" or "Order Flow" indicator to your chart
+   - Use `request.security()` to pull delta values from that indicator
+   - Update the Pine Script's `i_of_use_premium` input to `true`
+
+2. **Tradovate Market Depth API**
+   - Access via `GET /md/getDOM` endpoint
+   - Returns full bid/ask ladder in real time
+   - Can be integrated directly into `tradovate_client.py` for server-side OF calculation
+
+---
+
+## 9. Running the Bot
 
 ### Demo / Paper Mode (Start Here)
 

@@ -1,21 +1,20 @@
 """
-strategy_logic.py — Strategy Signal Validation Engine
-======================================================
-The Python bot receives pre-computed signals from the TradingView Pine Script
-via webhook.  This module acts as a second validation layer — it independently
-re-checks every condition before allowing the trade to proceed.
+strategy_logic.py — Strategy Signal Validation Engine  (v2 — with Order Flow)
+==============================================================================
+Validates every incoming TradingView webhook signal before execution.
 
-Responsibilities:
-  • Parse and validate incoming TradingView webhook payloads
-  • Enforce opening-range timing rules
-  • Validate RSI / ATR / volume / ADX filters
-  • Track intrabar opening-range state
-  • Determine session status
-  • Compute SL / TP prices from ATR
+v2 changes:
+  • Accepts and passes through OrderFlowData from the webhook payload
+  • Calls OrderFlowFilter as the final confirmation gate
+  • Returns enriched signal dict that includes of_result for Telegram alerts
+  • parse_and_validate_signal() now returns None OR a dict with 'of_result' key
 
-Independent indicator calculation is included so the bot can run
-without a live TradingView connection (e.g. for unit testing or
-if TradingView signals are delayed).
+Architecture
+────────────
+TradingView fires webhook → strategy_logic validates ORB/VWAP conditions
+→ OrderFlowFilter provides optional OF confirmation
+→ risk_manager.py sizes the position
+→ tradovate_client.py places the order
 """
 
 import logging
@@ -26,8 +25,12 @@ from typing import Dict, List, Optional, Tuple
 import pytz
 
 import config
+from order_flow_filter import OrderFlowData, OrderFlowFilter, OrderFlowResult
 
 logger = logging.getLogger(__name__)
+
+# Module-level singleton so filter config is read once at import time
+_of_filter = OrderFlowFilter()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -35,7 +38,7 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def ema(values: List[float], period: int) -> List[float]:
-    """Exponential moving average — returns same-length list."""
+    """Exponential moving average — returns same-length list (warm-up = SMA)."""
     if not values or period < 1:
         return []
     k = 2.0 / (period + 1)
@@ -46,9 +49,9 @@ def ema(values: List[float], period: int) -> List[float]:
 
 
 def rsi(closes: List[float], period: int = 14) -> float:
-    """Wilder RSI.  Returns the last value."""
+    """Wilder RSI.  Returns the last value. Default: 50 (neutral) on thin data."""
     if len(closes) < period + 1:
-        return 50.0   # neutral default
+        return 50.0
     gains, losses = [], []
     for i in range(1, len(closes)):
         diff = closes[i] - closes[i - 1]
@@ -79,7 +82,6 @@ def atr(highs: List[float], lows: List[float], closes: List[float], period: int 
     trs = [true_range(highs[i], lows[i], closes[i - 1]) for i in range(1, len(closes))]
     if len(trs) < period:
         return sum(trs) / len(trs)
-    # Wilder smoothing
     atr_val = sum(trs[:period]) / period
     for tr in trs[period:]:
         atr_val = (atr_val * (period - 1) + tr) / period
@@ -92,13 +94,13 @@ def adx(
     closes: List[float],
     period: int = 14,
 ) -> float:
-    """Simple ADX calculation (Wilder).  Returns last ADX value."""
+    """Simple ADX (Wilder). Returns last ADX value."""
     if len(closes) < period * 2:
-        return 25.0   # neutral default
+        return 25.0
 
     dm_plus, dm_minus, trs = [], [], []
     for i in range(1, len(closes)):
-        up   = highs[i]  - highs[i - 1]
+        up   = highs[i]    - highs[i - 1]
         down = lows[i - 1] - lows[i]
         dm_plus.append(up   if up > down and up > 0   else 0)
         dm_minus.append(down if down > up and down > 0 else 0)
@@ -110,8 +112,8 @@ def adx(
             out.append(out[-1] - out[-1] / n + v)
         return out
 
-    s_tr  = smooth(trs, period)
-    s_dmp = smooth(dm_plus, period)
+    s_tr  = smooth(trs,      period)
+    s_dmp = smooth(dm_plus,  period)
     s_dmm = smooth(dm_minus, period)
 
     di_plus  = [100 * p / t if t else 0 for p, t in zip(s_dmp, s_tr)]
@@ -125,8 +127,8 @@ def adx(
         return sum(dx_list) / len(dx_list)
 
     adx_val = sum(dx_list[:period]) / period
-    for dx in dx_list[period:]:
-        adx_val = (adx_val * (period - 1) + dx) / period
+    for dx_v in dx_list[period:]:
+        adx_val = (adx_val * (period - 1) + dx_v) / period
     return adx_val
 
 
@@ -157,11 +159,10 @@ class OpeningRangeTracker:
     def reset(self) -> None:
         self.or_high: Optional[float] = None
         self.or_low:  Optional[float] = None
-        self.locked:  bool            = False   # True once OR period ends
+        self.locked:  bool            = False
         self._date:   Optional[str]   = None
 
     def update(self, bar_time: datetime, high: float, low: float) -> None:
-        """Feed each 5-minute bar; call during 9:30–10:00 ET."""
         bar_date = bar_time.date().isoformat()
         if bar_date != self._date:
             self.reset()
@@ -170,7 +171,6 @@ class OpeningRangeTracker:
         et_time = bar_time.astimezone(config.TIMEZONE)
         bar_t   = et_time.time()
 
-        # Only update during the OR window
         if config.SESSION_START <= bar_t < config.OPENING_RANGE_END:
             self.or_high = max(self.or_high or -math.inf, high)
             self.or_low  = min(self.or_low  or math.inf,  low)
@@ -203,8 +203,8 @@ class OpeningRangeTracker:
 # ═══════════════════════════════════════════════════════════════════════════════
 class StrategyEngine:
     """
-    Validates signals arriving from TradingView.
-    Also exposes helper methods for session timing.
+    Validates signals arriving from TradingView and optionally applies
+    order flow confirmation via OrderFlowFilter.
     """
 
     def __init__(self) -> None:
@@ -213,42 +213,30 @@ class StrategyEngine:
 
     # ── session helpers ─────────────────────────────────────────────────────
     def is_trading_session(self, now: datetime) -> bool:
-        """True if the current time is within the allowed trading session."""
         et_time = now.astimezone(self.tz).time()
         return config.SESSION_START <= et_time < config.SESSION_END
 
     def is_entry_allowed(self, now: datetime) -> bool:
-        """True if we are past the OR period and can accept new entries."""
         et_time = now.astimezone(self.tz).time()
         return config.OPENING_RANGE_END <= et_time < config.POSITION_CLOSE_TIME
 
     def is_force_close_time(self, now: datetime) -> bool:
-        """True if we must close all positions now (EOD time stop)."""
         et_time = now.astimezone(self.tz).time()
         return et_time >= config.POSITION_CLOSE_TIME
 
-    # ── signal parsing ──────────────────────────────────────────────────────
+    # ── main validation pipeline ────────────────────────────────────────────
     def parse_and_validate_signal(self, payload: dict) -> Optional[dict]:
         """
-        Parse a TradingView webhook payload and validate every condition.
+        Full validation pipeline for a TradingView webhook payload.
 
-        Expected payload keys (see Pine Script alert):
-            action        : "BUY" | "SELL"
-            instrument    : "MGC" | "GC"
-            price         : close price of the triggering bar
-            atr           : ATR(14) value
-            rsi           : RSI(14) value
-            adx           : ADX(14) value
-            vwap          : session VWAP
-            or_high       : OR high
-            or_low        : OR low
-            volume        : bar volume
-            volume_avg    : 20-bar average volume
-            signal_type   : "ORB" | "VWAP_MR"
-            ema20         : 20 EMA on 15-min chart
-            secret        : must match WEBHOOK_SECRET
+        Returns a validated signal dict (including 'of_result' for Telegram)
+        or None if any check fails.
 
-        Returns a validated signal dict or None if any check fails.
+        Expected payload fields:
+            action, instrument, price, atr, rsi, adx, vwap,
+            or_high, or_low, volume, volume_avg, signal_type, ema20,
+            secret
+            — plus optional order flow fields (of_*) —
         """
         now = datetime.now(self.tz)
 
@@ -261,22 +249,22 @@ class StrategyEngine:
         required = ["action", "instrument", "price", "atr", "signal_type"]
         for key in required:
             if key not in payload:
-                logger.warning("Missing required field '%s' in signal", key)
+                logger.warning("Missing required field '%s'", key)
                 return None
 
-        action      = payload["action"].upper()          # "BUY" | "SELL"
+        action      = payload["action"].upper()
         instrument  = payload["instrument"].upper()
         price       = float(payload["price"])
-        atr_val     = float(payload.get("atr", 1.0))
-        rsi_val     = float(payload.get("rsi", 50.0))
-        adx_val     = float(payload.get("adx", 25.0))
-        vwap        = float(payload.get("vwap", price))
-        or_high     = float(payload.get("or_high", price))
-        or_low      = float(payload.get("or_low", price))
-        volume      = float(payload.get("volume", 0.0))
+        atr_val     = float(payload.get("atr",        1.0))
+        rsi_val     = float(payload.get("rsi",        50.0))
+        adx_val     = float(payload.get("adx",        25.0))
+        vwap        = float(payload.get("vwap",       price))
+        or_high     = float(payload.get("or_high",    price))
+        or_low      = float(payload.get("or_low",     price))
+        volume      = float(payload.get("volume",     0.0))
         volume_avg  = float(payload.get("volume_avg", 1.0))
         signal_type = payload.get("signal_type", "ORB").upper()
-        ema20       = float(payload.get("ema20", price))
+        ema20       = float(payload.get("ema20",      price))
 
         if action not in ("BUY", "SELL"):
             logger.warning("Invalid action: %s", action)
@@ -286,7 +274,7 @@ class StrategyEngine:
             logger.warning("Unknown instrument: %s", instrument)
             return None
 
-        # ── 2. Session check ──────────────────────────────────────────────
+        # ── 2. Session / entry window ─────────────────────────────────────
         if not self.is_entry_allowed(now):
             logger.info("Signal outside entry window — ignored")
             return None
@@ -296,28 +284,43 @@ class StrategyEngine:
             logger.warning("ATR ≤ 0 — invalid signal")
             return None
 
-        # ── 4. Opening Range Breakout validations ─────────────────────────
+        # ── 4. ORB / VWAP MR primary validation ──────────────────────────
+        of_result: Optional[OrderFlowResult] = None
+
         if signal_type == "ORB":
-            result = self._validate_orb(
-                action, price, or_high, or_low, vwap, rsi_val, adx_val,
-                volume, volume_avg, ema20
-            )
-            if not result:
+            if not self._validate_orb(
+                action, price, or_high, or_low, vwap,
+                rsi_val, adx_val, volume, volume_avg, ema20
+            ):
                 return None
 
-        # ── 5. VWAP Mean-Reversion validations ───────────────────────────
+            # ── 5. Order flow confirmation (ORB only) ─────────────────────
+            of_data = OrderFlowFilter.from_payload(payload)
+            of_result = _of_filter.validate(
+                action   = action,
+                of_data  = of_data,
+                or_high  = or_high,
+                or_low   = or_low,
+            )
+            if not of_result.passed:
+                logger.info("Gate: Order Flow FAIL — %s", of_result.reason)
+                return None
+
         elif signal_type == "VWAP_MR":
-            result = self._validate_vwap_mr(
-                action, price, vwap, atr_val, adx_val, rsi_val
-            )
-            if not result:
+            if not self._validate_vwap_mr(action, price, vwap, atr_val, adx_val, rsi_val):
                 return None
-
+            # OF filter is NOT applied to VWAP MR trades by design
+            of_data   = OrderFlowFilter.from_payload(payload)
+            of_result = OrderFlowResult(
+                passed  = True,
+                reason  = "OF filter not applied to VWAP MR signals",
+                of_data = of_data,
+            )
         else:
             logger.warning("Unknown signal_type: %s", signal_type)
             return None
 
-        # ── 6. Build validated signal dict ────────────────────────────────
+        # ── 6. Compute SL distance ────────────────────────────────────────
         sl_points = max(
             atr_val * config.SL_ATR_MIN,
             min(atr_val * config.SL_ATR_MAX, atr_val * config.SL_ATR_DEFAULT),
@@ -336,10 +339,15 @@ class StrategyEngine:
             "ema20":       ema20,
             "sl_points":   round(sl_points, 2),
             "signal_type": signal_type,
+            "of_result":   of_result,        # ← enriched for Telegram alerts
+            "of_summary":  OrderFlowFilter.format_of_summary(of_result.of_data)
+                           if of_result and of_result.of_data else "OF: N/A",
         }
         logger.info(
-            "✅ Signal validated: %s %s @ %.2f | ATR=%.2f SL_pts=%.2f RSI=%.1f ADX=%.1f",
-            action, instrument, price, atr_val, sl_points, rsi_val, adx_val,
+            "✅ Signal validated: %s %s @ %.2f | ATR=%.2f SL_pts=%.2f "
+            "RSI=%.1f ADX=%.1f | %s",
+            action, instrument, price, atr_val, sl_points,
+            rsi_val, adx_val, signal["of_summary"],
         )
         return signal
 
@@ -357,68 +365,58 @@ class StrategyEngine:
         volume_avg: float,
         ema20:      float,
     ) -> bool:
-        """Validate an Opening Range Breakout signal."""
+        """All ORB conditions.  Returns False with log on first failure."""
         or_range = or_high - or_low
 
-        # ── A. OR range width ──────────────────────────────────────────────
+        # A. OR range width
         if or_range < config.OR_MIN_RANGE_POINTS:
-            logger.info(
-                "ORB rejected: OR range %.2f < min %.2f",
-                or_range, config.OR_MIN_RANGE_POINTS,
-            )
+            logger.info("ORB rejected: OR range %.2f < min %.2f", or_range, config.OR_MIN_RANGE_POINTS)
             return False
 
-        # ── B. Breakout direction ─────────────────────────────────────────
+        # B. Breakout direction
         if action == "BUY":
             if price <= or_high:
-                logger.info("ORB LONG rejected: price %.2f not above OR High %.2f", price, or_high)
+                logger.info("ORB LONG: price %.2f ≤ OR High %.2f — no breakout", price, or_high)
                 return False
-        else:  # SELL
+        else:
             if price >= or_low:
-                logger.info("ORB SHORT rejected: price %.2f not below OR Low %.2f", price, or_low)
+                logger.info("ORB SHORT: price %.2f ≥ OR Low %.2f — no breakdown", price, or_low)
                 return False
 
-        # ── C. VWAP filter ────────────────────────────────────────────────
+        # C. VWAP filter
         if action == "BUY" and price < vwap:
-            logger.info("ORB LONG rejected: price %.2f below VWAP %.2f", price, vwap)
+            logger.info("ORB LONG: price %.2f < VWAP %.2f", price, vwap)
             return False
         if action == "SELL" and price > vwap:
-            logger.info("ORB SHORT rejected: price %.2f above VWAP %.2f", price, vwap)
+            logger.info("ORB SHORT: price %.2f > VWAP %.2f", price, vwap)
             return False
 
-        # ── D. Higher-TF trend bias (EMA20 on 15-min) ────────────────────
+        # D. Higher-TF trend bias (EMA20 on 15-min)
         if action == "BUY" and price < ema20:
-            logger.info("ORB LONG rejected: price %.2f below 15m EMA20 %.2f", price, ema20)
+            logger.info("ORB LONG: price %.2f < 15m EMA20 %.2f", price, ema20)
             return False
         if action == "SELL" and price > ema20:
-            logger.info("ORB SHORT rejected: price %.2f above 15m EMA20 %.2f", price, ema20)
+            logger.info("ORB SHORT: price %.2f > 15m EMA20 %.2f", price, ema20)
             return False
 
-        # ── E. RSI filter (strictly between 45–55) ────────────────────────
+        # E. RSI strictly 45–55
         if action == "BUY":
             if not (config.RSI_LONG_MIN < rsi_val < config.RSI_LONG_MAX):
-                logger.info(
-                    "ORB LONG rejected: RSI %.1f not in [%.0f, %.0f]",
-                    rsi_val, config.RSI_LONG_MIN, config.RSI_LONG_MAX,
-                )
+                logger.info("ORB LONG: RSI %.1f not in (%.0f, %.0f)", rsi_val,
+                             config.RSI_LONG_MIN, config.RSI_LONG_MAX)
                 return False
         else:
             if not (config.RSI_SHORT_MIN < rsi_val < config.RSI_SHORT_MAX):
-                logger.info(
-                    "ORB SHORT rejected: RSI %.1f not in [%.0f, %.0f]",
-                    rsi_val, config.RSI_SHORT_MIN, config.RSI_SHORT_MAX,
-                )
+                logger.info("ORB SHORT: RSI %.1f not in (%.0f, %.0f)", rsi_val,
+                             config.RSI_SHORT_MIN, config.RSI_SHORT_MAX)
                 return False
 
-        # ── F. Volume confirmation ────────────────────────────────────────
+        # F. Volume confirmation
         if volume_avg > 0 and volume < volume_avg * config.VOLUME_MULT:
-            logger.info(
-                "ORB rejected: volume %.0f < %.1f× avg %.0f",
-                volume, config.VOLUME_MULT, volume_avg,
-            )
+            logger.info("ORB: volume %.0f < %.1f× avg %.0f", volume, config.VOLUME_MULT, volume_avg)
             return False
 
-        logger.info("ORB signal passes all filters ✓")
+        logger.info("ORB primary conditions passed ✓")
         return True
 
     # ── VWAP mean-reversion validation ─────────────────────────────────────
@@ -431,63 +429,46 @@ class StrategyEngine:
         adx_val: float,
         rsi_val: float,
     ) -> bool:
-        """Validate an optional VWAP mean-reversion signal."""
         deviation = abs(price - vwap)
         min_dev   = atr_val * config.VWAP_MR_ATR_MULT
 
-        # Must be > 2 ATR from VWAP
         if deviation < min_dev:
-            logger.info(
-                "VWAP MR rejected: deviation %.2f < %.2f (2×ATR)",
-                deviation, min_dev,
-            )
+            logger.info("VWAP MR: deviation %.2f < %.2f (2×ATR)", deviation, min_dev)
             return False
 
-        # Direction must be mean-reverting (selling overbought, buying oversold)
         if action == "BUY" and price >= vwap:
-            logger.info("VWAP MR LONG rejected: price above VWAP (not oversold)")
+            logger.info("VWAP MR LONG: price above VWAP (not oversold)")
             return False
         if action == "SELL" and price <= vwap:
-            logger.info("VWAP MR SHORT rejected: price below VWAP (not overbought)")
+            logger.info("VWAP MR SHORT: price below VWAP (not overbought)")
             return False
 
-        # Market must be range-bound (ADX < threshold)
         if adx_val >= config.VWAP_MR_ADX_MAX:
-            logger.info(
-                "VWAP MR rejected: ADX %.1f ≥ %.1f (trending, not range-bound)",
-                adx_val, config.VWAP_MR_ADX_MAX,
-            )
+            logger.info("VWAP MR: ADX %.1f ≥ %.1f (trending)", adx_val, config.VWAP_MR_ADX_MAX)
             return False
 
-        # RSI must confirm the mean-reversion setup
         if action == "BUY" and rsi_val >= 45:
-            logger.info("VWAP MR LONG rejected: RSI %.1f not oversold enough", rsi_val)
+            logger.info("VWAP MR LONG: RSI %.1f not oversold enough", rsi_val)
             return False
         if action == "SELL" and rsi_val <= 55:
-            logger.info("VWAP MR SHORT rejected: RSI %.1f not overbought enough", rsi_val)
+            logger.info("VWAP MR SHORT: RSI %.1f not overbought enough", rsi_val)
             return False
 
-        logger.info("VWAP MR signal passes all filters ✓")
+        logger.info("VWAP MR primary conditions passed ✓")
         return True
 
     # ── SL / TP helpers ─────────────────────────────────────────────────────
     @staticmethod
-    def compute_levels(
-        action:     str,
-        entry:      float,
-        sl_points:  float,
-    ) -> Dict[str, float]:
-        """Compute SL, TP1, and TP2 prices from entry and ATR-based SL distance."""
+    def compute_levels(action: str, entry: float, sl_points: float) -> Dict[str, float]:
         if action == "BUY":
-            sl   = entry - sl_points
-            tp1  = entry + sl_points * config.TP1_R
-            tp2  = entry + sl_points * config.TP2_R
+            return {
+                "sl_price":  round(entry - sl_points,                     2),
+                "tp1_price": round(entry + sl_points * config.TP1_R,      2),
+                "tp2_price": round(entry + sl_points * config.TP2_R,      2),
+            }
         else:
-            sl   = entry + sl_points
-            tp1  = entry - sl_points * config.TP1_R
-            tp2  = entry - sl_points * config.TP2_R
-        return {
-            "sl_price":  round(sl,  2),
-            "tp1_price": round(tp1, 2),
-            "tp2_price": round(tp2, 2),
-        }
+            return {
+                "sl_price":  round(entry + sl_points,                     2),
+                "tp1_price": round(entry - sl_points * config.TP1_R,      2),
+                "tp2_price": round(entry - sl_points * config.TP2_R,      2),
+            }

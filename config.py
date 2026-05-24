@@ -1,8 +1,12 @@
 """
-config.py — Ultra-Conservative Gold Futures Trading Bot
-========================================================
+config.py — Ultra-Conservative Gold Futures Trading Bot  (v2 — with Order Flow)
+================================================================================
 Central configuration for all modules. Every tuneable parameter lives here.
 Override via environment variables or .env file — no hardcoded secrets.
+
+v2 additions vs v1:
+  • ORDER_FLOW_* section — optional order flow confirmation module
+  • OF conditions are individually togglable (all OFF by default)
 """
 
 import os
@@ -37,7 +41,6 @@ WEBHOOK_PORT   = int(os.getenv("WEBHOOK_PORT", "8080"))
 # ═══════════════════════════════════════════════════════════════════════════════
 DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() in ("true", "1", "yes")
 
-# Tradovate REST base URL and WebSocket URLs
 TRADOVATE_BASE_URL = (
     "https://demo.tradovateapi.com/v1"
     if DEMO_MODE
@@ -57,7 +60,7 @@ TRADOVATE_MD_URL = "wss://md.tradovateapi.com/v1/websocket"
 class InstrumentSpec:
     symbol:                str
     full_name:             str
-    point_value:           float   # USD per full point (e.g. 1.0 = $100 for GC)
+    point_value:           float   # USD per full point
     tick_size:             float   # Minimum price movement
     tick_value:            float   # USD per tick
     default_max_contracts: int     # Hard ceiling regardless of sizing calc
@@ -67,7 +70,7 @@ INSTRUMENTS: Dict[str, InstrumentSpec] = {
     "MGC": InstrumentSpec(
         symbol="MGC",
         full_name="Micro Gold Futures",
-        point_value=10.0,      # $10 / point
+        point_value=10.0,
         tick_size=0.10,
         tick_value=1.00,
         default_max_contracts=10,
@@ -76,7 +79,7 @@ INSTRUMENTS: Dict[str, InstrumentSpec] = {
     "GC": InstrumentSpec(
         symbol="GC",
         full_name="Gold Futures",
-        point_value=100.0,     # $100 / point
+        point_value=100.0,
         tick_size=0.10,
         tick_value=10.00,
         default_max_contracts=2,
@@ -84,7 +87,6 @@ INSTRUMENTS: Dict[str, InstrumentSpec] = {
     ),
 }
 
-# Primary instrument (use MGC for prop firm evaluations — safer sizing)
 DEFAULT_INSTRUMENT = os.getenv("DEFAULT_INSTRUMENT", "MGC").upper()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -92,72 +94,106 @@ DEFAULT_INSTRUMENT = os.getenv("DEFAULT_INSTRUMENT", "MGC").upper()
 # ═══════════════════════════════════════════════════════════════════════════════
 TIMEZONE = pytz.timezone("America/New_York")
 
-SESSION_START       = time(9, 30)   # 09:30 ET — session open
-SESSION_END         = time(15, 0)   # 15:00 ET — no new entries after this
-POSITION_CLOSE_TIME = time(14, 45)  # 14:45 ET — force-close all open positions
-OPENING_RANGE_END   = time(10, 0)   # 10:00 ET — OR period complete, entries allowed after
+SESSION_START       = time(9, 30)
+SESSION_END         = time(15, 0)
+POSITION_CLOSE_TIME = time(14, 45)
+OPENING_RANGE_END   = time(10, 0)
 
-# Minimum bar close time after OR end before first entry (avoid first-bar fakes)
 ENTRY_DELAY_BARS = int(os.getenv("ENTRY_DELAY_BARS", "1"))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STRATEGY PARAMETERS — OPENING RANGE BREAKOUT
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# --- Opening Range ---------------------------------------------------------
 OR_MIN_RANGE_POINTS = float(os.getenv("OR_MIN_RANGE_POINTS", "1.5"))
-# Skip the day if OR is tighter than this (choppy, no edge)
 
-# --- VWAP Mean-Reversion (optional counter-trend) -------------------------
-VWAP_MR_ATR_MULT    = 2.0   # Enter MR only if price > 2× ATR from VWAP
-VWAP_MR_ADX_MAX     = 22.0  # Only in range-bound conditions (ADX < 22)
+VWAP_MR_ATR_MULT    = 2.0
+VWAP_MR_ADX_MAX     = 22.0
 
-# --- Indicators -----------------------------------------------------------
-EMA_PERIOD          = 20    # EMA period (on 15-min chart for trend bias)
+EMA_PERIOD          = 20
 RSI_PERIOD          = 14
-RSI_LONG_MIN        = 45    # RSI range for LONG entries
+RSI_LONG_MIN        = 45
 RSI_LONG_MAX        = 55
-RSI_SHORT_MIN       = 45    # RSI range for SHORT entries
+RSI_SHORT_MIN       = 45
 RSI_SHORT_MAX       = 55
 ATR_PERIOD          = 14
 ADX_PERIOD          = 14
 VOLUME_MA_PERIOD    = 20
-VOLUME_MULT         = 1.2   # Volume must exceed 1.2× its 20-bar average
+VOLUME_MULT         = 1.2
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# RISK MANAGEMENT  (all percentages expressed as decimals, e.g. 0.003 = 0.30%)
+# RISK MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
+RISK_PER_TRADE_PCT  = float(os.getenv("RISK_PER_TRADE_PCT", "0.003"))
+RISK_MAX_PCT        = 0.004
+RISK_MIN_PCT        = 0.0025
 
-# --- Per-trade risk -------------------------------------------------------
-RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.003"))   # 0.30% default
-RISK_MAX_PCT       = 0.004   # Hard ceiling — never exceed 0.40%
-RISK_MIN_PCT       = 0.0025  # Floor — minimum meaningful risk
+SL_ATR_DEFAULT      = float(os.getenv("SL_ATR_DEFAULT", "1.0"))
+SL_ATR_MIN          = 0.75
+SL_ATR_MAX          = 1.2
 
-# --- Stop-loss / Take-profit (ATR-based) ---------------------------------
-SL_ATR_DEFAULT = float(os.getenv("SL_ATR_DEFAULT", "1.0"))  # 1.0 × ATR for SL
-SL_ATR_MIN     = 0.75   # Tightest allowed SL (never goes below 0.75 ATR)
-SL_ATR_MAX     = 1.2    # Widest allowed SL (never widen beyond 1.2 ATR)
+TP1_R               = 1.5
+TP2_R               = 2.5
 
-TP1_R = 1.5   # First target = 1.5R (close 50% of position)
-TP2_R = 2.5   # Second target = 2.5R (close remaining 50%)
+DAILY_LOSS_LIMIT_PCT    = float(os.getenv("DAILY_LOSS_LIMIT_PCT",    "0.0085"))
+DAILY_PROFIT_TARGET_PCT = float(os.getenv("DAILY_PROFIT_TARGET_PCT", "0.012"))
+MAX_TRADES_PER_DAY      = int(os.getenv("MAX_TRADES_PER_DAY", "3"))
 
-# --- Daily limits ---------------------------------------------------------
-DAILY_LOSS_LIMIT_PCT   = float(os.getenv("DAILY_LOSS_LIMIT_PCT",   "0.0085"))  # 0.85%
-DAILY_PROFIT_TARGET_PCT = float(os.getenv("DAILY_PROFIT_TARGET_PCT", "0.012")) # 1.20%
-MAX_TRADES_PER_DAY     = int(os.getenv("MAX_TRADES_PER_DAY", "3"))
+MAX_DAY_PROFIT_SHARE        = 0.35
+AFTER_1_LOSS_SIZE_REDUCTION = 0.50
+AFTER_2_LOSSES_STOP         = True
+INTRADAY_DD_PAUSE_PCT       = 0.005
+PROP_FIRM_DD_BUFFER_PCT     = 0.50
 
-# --- Consistency rule (prop firm safeguard) --------------------------------
-MAX_DAY_PROFIT_SHARE   = 0.35   # No single day > 35% of cumulative profits
+# ═══════════════════════════════════════════════════════════════════════════════
+# ORDER FLOW FILTER  (v2 addition)
+# ═══════════════════════════════════════════════════════════════════════════════
+# ─── Master switch ─────────────────────────────────────────────────────────────
+# Keep OFF during initial prop evaluation phases for maximum reliability.
+# Enable one condition at a time after gathering at least 10 days of signal data.
+ORDER_FLOW_ENABLED = os.getenv("ORDER_FLOW_ENABLED", "false").lower() in ("true", "1", "yes")
 
-# --- Consecutive-loss management ------------------------------------------
-AFTER_1_LOSS_SIZE_REDUCTION = 0.50   # Cut size by 50% after first loss
-AFTER_2_LOSSES_STOP         = True   # Hard stop after 2 consecutive losses
+# ─── Individual condition toggles (only relevant when ORDER_FLOW_ENABLED=true) ─
+# Require cumulative session delta to agree with trade direction:
+#   Long  → cumulative delta must be positive (net buying)
+#   Short → cumulative delta must be negative (net selling)
+OF_REQUIRE_POSITIVE_DELTA = os.getenv("OF_REQUIRE_POSITIVE_DELTA", "true").lower() in ("true", "1")
 
-# --- Intraday equity curve protection ------------------------------------
-INTRADAY_DD_PAUSE_PCT = 0.005  # Pause if intraday drawdown exceeds 0.50%
+# Require the breakout/breakdown bar's volume delta to agree with direction:
+#   Long  → bar delta > 0 (buying pressure on the entry bar)
+#   Short → bar delta < 0 (selling pressure on the entry bar)
+OF_REQUIRE_BAR_DELTA = os.getenv("OF_REQUIRE_BAR_DELTA", "true").lower() in ("true", "1")
 
-# --- Prop-firm buffer (maintained at all times) ---------------------------
-PROP_FIRM_DD_BUFFER_PCT = 0.50  # Keep 50% of allowed DD as safety margin
+# Require bid/ask size imbalance (useful with true Level II data; noisy with approximations)
+OF_REQUIRE_IMBALANCE = os.getenv("OF_REQUIRE_IMBALANCE", "false").lower() in ("true", "1")
+
+# Require absorption event at the relevant OR boundary:
+#   Long  → absorption at OR Low (bears failed to hold below it)
+#   Short → absorption at OR High (bulls failed to hold above it)
+OF_REQUIRE_ABSORPTION = os.getenv("OF_REQUIRE_ABSORPTION", "false").lower() in ("true", "1")
+
+# Reject signals where price and cumulative delta diverge (price up but delta down = warning)
+OF_REQUIRE_NO_DIVERGENCE = os.getenv("OF_REQUIRE_NO_DIVERGENCE", "false").lower() in ("true", "1")
+
+# ─── Numeric thresholds ────────────────────────────────────────────────────────
+# Minimum absolute value of cumulative delta required (0 = any sign agreement)
+OF_MIN_CUMULATIVE_DELTA  = float(os.getenv("OF_MIN_CUMULATIVE_DELTA",  "0"))
+
+# Minimum absolute value of bar delta required (0 = any sign agreement)
+OF_MIN_BAR_DELTA         = float(os.getenv("OF_MIN_BAR_DELTA",          "0"))
+
+# Minimum bid/ask imbalance (0.0–1.0 scale; 0.2 = moderate bid dominance)
+OF_IMBALANCE_THRESHOLD   = float(os.getenv("OF_IMBALANCE_THRESHOLD",    "0.20"))
+
+# Minimum absorption strength score (0.0–1.0; 0.5 = moderate absorption)
+OF_MIN_ABSORPTION_STRENGTH = float(os.getenv("OF_MIN_ABSORPTION_STRENGTH", "0.50"))
+
+# Minimum consecutive bars of agreeing delta direction (0 = disabled)
+OF_MIN_DELTA_TREND_BARS  = int(os.getenv("OF_MIN_DELTA_TREND_BARS",  "0"))
+
+# ─── Behaviour when OF data is missing from payload ───────────────────────────
+# True  = allow signal if no OF fields in payload (fail-open)
+# False = reject signal if OF fields expected but missing (fail-safe)
+OF_ALLOW_MISSING_DATA = os.getenv("OF_ALLOW_MISSING_DATA", "true").lower() in ("true", "1")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # NEWS FILTER
@@ -165,7 +201,6 @@ PROP_FIRM_DD_BUFFER_PCT = 0.50  # Keep 50% of allowed DD as safety margin
 NEWS_BLACKOUT_BEFORE_MIN = int(os.getenv("NEWS_BLACKOUT_BEFORE_MIN", "45"))
 NEWS_BLACKOUT_AFTER_MIN  = int(os.getenv("NEWS_BLACKOUT_AFTER_MIN",  "45"))
 
-# Keywords that trigger a high-impact event blackout
 HIGH_IMPACT_KEYWORDS: List[str] = [
     "CPI", "Consumer Price Index",
     "FOMC", "Federal Open Market",
@@ -175,8 +210,7 @@ HIGH_IMPACT_KEYWORDS: List[str] = [
     "PPI", "Producer Price Index",
     "PCE",
     "Retail Sales",
-    "ISM",
-    "PMI",
+    "ISM", "PMI",
     "Unemployment Rate",
     "Interest Rate Decision",
     "Fed Funds Rate",
@@ -186,9 +220,8 @@ HIGH_IMPACT_KEYWORDS: List[str] = [
     "Balance Sheet",
 ]
 
-# Calendar source (Forex Factory public JSON — no API key required)
-NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-NEWS_CALENDAR_TIMEOUT = 10   # seconds
+NEWS_CALENDAR_URL     = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+NEWS_CALENDAR_TIMEOUT = 10
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROP FIRM PRESETS
@@ -214,8 +247,8 @@ DAILY_REPORT_DIR = os.getenv("DAILY_REPORT_DIR", "logs/daily_reports")
 # ═══════════════════════════════════════════════════════════════════════════════
 # POLLING / RETRY
 # ═══════════════════════════════════════════════════════════════════════════════
-POSITION_POLL_INTERVAL = 10   # seconds between position checks
-EQUITY_POLL_INTERVAL   = 30   # seconds between equity refreshes
-TOKEN_REFRESH_MARGIN   = 3600 # refresh token 1 hour before expiry
+POSITION_POLL_INTERVAL = 10
+EQUITY_POLL_INTERVAL   = 30
+TOKEN_REFRESH_MARGIN   = 3600
 MAX_RETRY_ATTEMPTS     = 4
-RETRY_BASE_DELAY       = 2.0  # seconds (doubles each attempt)
+RETRY_BASE_DELAY       = 2.0
