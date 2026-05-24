@@ -1,0 +1,36 @@
+# ══════════════════════════════════════════════════════
+# UltimateTradingBot — Python Dependencies
+# Python 3.10+ required (asyncio improvements)
+# Install: pip install -r requirements.txt
+# ══════════════════════════════════════════════════════
+
+# ── Async HTTP & WebSocket ───────────────────────────
+aiohttp>=3.9.0,<4.0
+websockets>=12.0,<14.0
+
+# ── Web server (webhook receiver) ───────────────────
+fastapi>=0.109.0,<1.0
+uvicorn[standard]>=0.27.0,<1.0
+
+# ── Environment & Config ─────────────────────────────
+python-dotenv>=1.0.0,<2.0
+
+# ── Timezone handling ────────────────────────────────
+pytz>=2024.1
+
+# ── Numerical / indicators (optional local calc) ─────
+numpy>=1.26.0,<3.0
+pandas>=2.1.0,<3.0
+pandas-ta>=0.3.14b       # technical indicators (ATR, RSI, EMA, ADX)
+
+# ── Logging / utilities ──────────────────────────────
+colorlog>=6.8.0           # coloured console output
+tabulate>=0.9.0           # pretty tables in daily summary
+
+# ── HTTP (sync, used in news filter fallback) ────────
+requests>=2.31.0,<3.0
+
+# ── Testing ──────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+httpx>=0.26.0             # test FastAPI endpoints

@@ -1,0 +1,335 @@
+// ═══════════════════════════════════════════════════════════════════
+// Ultra-Conservative Gold Futures ORB + VWAP Strategy
+// TradingView Pine Script v5
+// ═══════════════════════════════════════════════════════════════════
+// Timeframe: 5-minute chart on GC or MGC
+// Sends webhook alerts to the Python trading bot.
+//
+// Alert message format (set in TradingView Alert → Message):
+//   Use the dynamic alert placeholder — see "Alert Setup" comments below.
+//
+// WEBHOOK URL:  http://<your-vps-ip>:8080/webhook
+// ═══════════════════════════════════════════════════════════════════
+
+//@version=5
+indicator(
+    title            = "Gold ORB + VWAP Ultra-Conservative",
+    shorttitle        = "Gold-ORB",
+    overlay           = true,
+    max_bars_back     = 500
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USER INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+grp_inst = "Instrument"
+i_symbol = input.string("MGC", "Symbol (MGC or GC)", group=grp_inst,
+             options=["MGC","GC"])
+
+grp_sess = "Session"
+i_sess_start = input.session("0930-1500", "Trading Session (ET)", group=grp_sess)
+i_or_end     = input.int(10, "Opening Range End Hour (ET)", minval=9, maxval=11, group=grp_sess)
+i_or_min     = input.int(0,  "Opening Range End Minute (ET)", minval=0, maxval=59, group=grp_sess)
+
+grp_ind = "Indicators"
+i_ema_period  = input.int(20, "EMA Period",         minval=5,  maxval=200, group=grp_ind)
+i_rsi_period  = input.int(14, "RSI Period",         minval=5,  maxval=50,  group=grp_ind)
+i_atr_period  = input.int(14, "ATR Period",         minval=5,  maxval=50,  group=grp_ind)
+i_adx_period  = input.int(14, "ADX Period",         minval=5,  maxval=50,  group=grp_ind)
+i_vol_ma_len  = input.int(20, "Volume MA Period",   minval=5,  maxval=100, group=grp_ind)
+i_vol_mult    = input.float(1.2, "Volume Multiplier", minval=1.0, maxval=3.0, step=0.1, group=grp_ind)
+
+grp_filt = "Filters"
+i_rsi_lo      = input.float(45.0, "RSI Long Min",   minval=30, maxval=55,  group=grp_filt)
+i_rsi_hi      = input.float(55.0, "RSI Long Max",   minval=45, maxval=70,  group=grp_filt)
+i_or_min_rng  = input.float(1.5,  "OR Min Range (pts)", minval=0.5, maxval=10.0, group=grp_filt)
+i_adx_mr_max  = input.float(22.0, "ADX Max for Mean-Rev", minval=10, maxval=35, group=grp_filt)
+i_vwap_atr_mult = input.float(2.0, "VWAP MR ATR Mult", minval=1.0, maxval=5.0, group=grp_filt)
+
+grp_risk = "Risk / Exits"
+i_sl_atr      = input.float(1.0,  "SL ATR Multiplier", minval=0.5, maxval=2.0, step=0.1, group=grp_risk)
+i_tp1_r       = input.float(1.5,  "TP1 (R multiple)",   minval=1.0, maxval=5.0, step=0.1, group=grp_risk)
+i_tp2_r       = input.float(2.5,  "TP2 (R multiple)",   minval=1.0, maxval=6.0, step=0.1, group=grp_risk)
+
+grp_webhook = "Webhook"
+i_secret      = input.string("changeme_set_in_env", "Webhook Secret",     group=grp_webhook)
+i_show_labels = input.bool(true, "Show Signal Labels",  group=grp_webhook)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION & TIMEZONE
+// ─────────────────────────────────────────────────────────────────────────────
+et_session  = "0930-1500:1234567"   // ET 9:30 – 15:00 every weekday
+in_session  = not na(time("5", et_session, "America/New_York"))
+
+// Is the current bar inside the Opening Range window? (9:30–10:00 ET)
+or_session  = "0930-1000:1234567"
+in_or_win   = not na(time("5", or_session, "America/New_York"))
+
+// Is this bar eligible for entries? (after OR, before 14:45)
+entry_sess  = "1000-1445:1234567"
+in_entry_win = not na(time("5", entry_sess, "America/New_York"))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INDICATORS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Session VWAP (resets at each NY session open)
+[vwap_val, vwap_upper, vwap_lower] = ta.vwap(hlc3, false, 1)
+
+// EMA on the current timeframe
+// (Pine Script requests 15-min data via request.security for the higher-TF EMA)
+ema_15m = request.security(syminfo.tickerid, "15", ta.ema(close, i_ema_period), lookahead=barmerge.lookahead_off)
+
+// ATR, RSI, ADX (all on the current 5-min chart)
+atr14 = ta.atr(i_atr_period)
+rsi14 = ta.rsi(close, i_rsi_period)
+[di_plus, di_minus, adx_val] = ta.dmi(i_adx_period, i_adx_period)
+
+// Volume MA
+vol_avg = ta.sma(volume, i_vol_ma_len)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OPENING RANGE CALCULATION
+// ─────────────────────────────────────────────────────────────────────────────
+var float or_high = na
+var float or_low  = na
+var bool  or_done = false
+
+// Detect first bar of each new day in the OR window
+is_new_session = ta.change(time("D")) != 0
+
+if is_new_session
+    or_high := na
+    or_low  := na
+    or_done := false
+
+// Expand OR while inside the 9:30–10:00 window
+if in_or_win
+    or_high := na(or_high) ? high : math.max(or_high, high)
+    or_low  := na(or_low)  ? low  : math.min(or_low,  low)
+    or_done := false
+else if not in_or_win and not na(or_high) and not or_done
+    or_done := true   // OR is now locked
+
+or_range = na(or_high) or na(or_low) ? 0.0 : or_high - or_low
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FILTERS (evaluated on every 5-min bar after OR is locked)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// F1: OR range is wide enough
+f_or_valid = or_done and or_range >= i_or_min_rng
+
+// F2: Volume confirmation
+f_volume = volume >= vol_avg * i_vol_mult
+
+// F3: RSI in the neutral zone (strict 45–55 for ORB)
+f_rsi_long  = rsi14 > i_rsi_lo and rsi14 < i_rsi_hi
+f_rsi_short = rsi14 > i_rsi_lo and rsi14 < i_rsi_hi
+
+// F4: ATR not extreme (volatility filter — skip if ATR > 2× its 50-bar average)
+atr_avg = ta.sma(atr14, 50)
+f_atr_ok = atr14 < atr_avg * 2.5 and atr14 > atr_avg * 0.5
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ORB SIGNAL CONDITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// LONG: close above OR High + above VWAP + above 15m EMA
+orb_long  = in_entry_win
+  and f_or_valid
+  and close > or_high      // breakout above OR High
+  and close > vwap_val     // above VWAP
+  and close > ema_15m      // bullish 15m bias
+  and f_rsi_long
+  and f_volume
+  and f_atr_ok
+
+// SHORT: close below OR Low + below VWAP + below 15m EMA
+orb_short = in_entry_win
+  and f_or_valid
+  and close < or_low       // breakdown below OR Low
+  and close < vwap_val     // below VWAP
+  and close < ema_15m      // bearish 15m bias
+  and f_rsi_short
+  and f_volume
+  and f_atr_ok
+
+// Prevent multiple entries in the same direction on the same day
+var bool had_long_today  = false
+var bool had_short_today = false
+var int  trades_today    = 0
+
+if is_new_session
+    had_long_today  := false
+    had_short_today := false
+    trades_today    := 0
+
+orb_long_entry  = orb_long  and not had_long_today  and trades_today < 3
+orb_short_entry = orb_short and not had_short_today and trades_today < 3
+
+if orb_long_entry
+    had_long_today := true
+    trades_today   := trades_today + 1
+
+if orb_short_entry
+    had_short_today := true
+    trades_today    := trades_today + 1
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VWAP MEAN-REVERSION CONDITIONS (Optional counter-trend)
+// ─────────────────────────────────────────────────────────────────────────────
+vwap_dev = math.abs(close - vwap_val)
+vwap_mr_min_dev = atr14 * i_vwap_atr_mult
+
+// MR LONG: price fallen > 2 ATR below VWAP + range-bound (ADX < 22) + oversold RSI
+mr_long  = in_entry_win
+  and f_or_valid
+  and vwap_dev >= vwap_mr_min_dev
+  and close < vwap_val
+  and adx_val < i_adx_mr_max
+  and rsi14 < 45              // oversold
+  and f_volume
+  and f_atr_ok
+  and trades_today < 3
+
+// MR SHORT: price risen > 2 ATR above VWAP + range-bound + overbought RSI
+mr_short = in_entry_win
+  and f_or_valid
+  and vwap_dev >= vwap_mr_min_dev
+  and close > vwap_val
+  and adx_val < i_adx_mr_max
+  and rsi14 > 55              // overbought
+  and f_volume
+  and f_atr_ok
+  and trades_today < 3
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMPUTE SL / TP LEVELS FOR VISUALIZATION
+// ─────────────────────────────────────────────────────────────────────────────
+sl_pts  = atr14 * i_sl_atr
+tp1_pts = sl_pts * i_tp1_r
+tp2_pts = sl_pts * i_tp2_r
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Opening Range
+plot(or_done and not na(or_high) ? or_high : na,
+     "OR High", color=color.new(color.orange, 0), linewidth=1, style=plot.style_linebr)
+plot(or_done and not na(or_low) ? or_low : na,
+     "OR Low",  color=color.new(color.orange, 0), linewidth=1, style=plot.style_linebr)
+
+// VWAP
+plot(vwap_val, "VWAP", color=color.new(color.blue, 20), linewidth=2)
+
+// 15-min EMA
+plot(ema_15m, "15m EMA20", color=color.new(color.purple, 30), linewidth=1)
+
+// Signal labels
+if i_show_labels
+    if orb_long_entry
+        label.new(bar_index, low - atr14 * 0.5,
+                  text="ORB\n▲LONG",
+                  color=color.new(color.green, 10),
+                  textcolor=color.white,
+                  style=label.style_label_up,
+                  size=size.small)
+
+    if orb_short_entry
+        label.new(bar_index, high + atr14 * 0.5,
+                  text="ORB\n▼SHORT",
+                  color=color.new(color.red, 10),
+                  textcolor=color.white,
+                  style=label.style_label_down,
+                  size=size.small)
+
+    if mr_long
+        label.new(bar_index, low - atr14 * 0.8,
+                  text="MR▲",
+                  color=color.new(color.teal, 20),
+                  textcolor=color.white,
+                  style=label.style_label_up,
+                  size=size.tiny)
+
+    if mr_short
+        label.new(bar_index, high + atr14 * 0.8,
+                  text="MR▼",
+                  color=color.new(color.maroon, 20),
+                  textcolor=color.white,
+                  style=label.style_label_down,
+                  size=size.tiny)
+
+// Background colour for OR window
+bgcolor(in_or_win   ? color.new(color.orange, 90) : na, title="OR Window")
+bgcolor(not in_entry_win and not in_or_win and in_session ? color.new(color.gray, 95) : na,
+        title="Closed to entries")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────────────────
+// ── How to set up TradingView Alerts ───────────────────────────────────────
+// 1. Open this indicator on a 5-min GC or MGC chart.
+// 2. Click the Alert (bell) icon → Create Alert.
+// 3. Condition: Gold-ORB → "ORB Long Entry" (or whichever condition)
+// 4. Webhook URL: http://<YOUR_VPS_IP>:8080/webhook
+// 5. Message (copy-paste the JSON below for each alert):
+//
+// ── ORB Long Alert Message ─────────────────────────────────────────────────
+// {
+//   "action":      "BUY",
+//   "instrument":  "MGC",
+//   "signal_type": "ORB",
+//   "price":       {{close}},
+//   "atr":         {{plot("ATR14")}},
+//   "rsi":         {{plot("RSI14")}},
+//   "adx":         {{plot("ADX")}},
+//   "vwap":        {{plot("VWAP")}},
+//   "ema20":       {{plot("15m EMA20")}},
+//   "or_high":     {{plot("OR High")}},
+//   "or_low":      {{plot("OR Low")}},
+//   "volume":      {{volume}},
+//   "volume_avg":  {{plot("Vol MA")}},
+//   "secret":      "YOUR_WEBHOOK_SECRET_HERE"
+// }
+//
+// ── ORB Short Alert Message ────────────────────────────────────────────────
+// {
+//   "action":      "SELL",
+//   "instrument":  "MGC",
+//   "signal_type": "ORB",
+//   "price":       {{close}},
+//   "atr":         {{plot("ATR14")}},
+//   "rsi":         {{plot("RSI14")}},
+//   "adx":         {{plot("ADX")}},
+//   "vwap":        {{plot("VWAP")}},
+//   "ema20":       {{plot("15m EMA20")}},
+//   "or_high":     {{plot("OR High")}},
+//   "or_low":      {{plot("OR Low")}},
+//   "volume":      {{volume}},
+//   "volume_avg":  {{plot("Vol MA")}},
+//   "secret":      "YOUR_WEBHOOK_SECRET_HERE"
+// }
+//
+// Replace "YOUR_WEBHOOK_SECRET_HERE" with your actual WEBHOOK_SECRET from .env
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Named plot references for alert message {{plot("...")}} syntax
+plot_atr    = plot(atr14,     "ATR14",   display=display.data_window)
+plot_rsi    = plot(rsi14,     "RSI14",   display=display.data_window)
+plot_adx    = plot(adx_val,   "ADX",     display=display.data_window)
+plot_volavg = plot(vol_avg,   "Vol MA",  display=display.data_window)
+
+// Alert conditions (one per direction per signal type)
+alertcondition(orb_long_entry,  title="ORB Long Entry",       message="ORB LONG signal")
+alertcondition(orb_short_entry, title="ORB Short Entry",      message="ORB SHORT signal")
+alertcondition(mr_long,         title="VWAP MR Long Entry",   message="VWAP MR LONG signal")
+alertcondition(mr_short,        title="VWAP MR Short Entry",  message="VWAP MR SHORT signal")
+
+// Composite "any signal" alert
+alertcondition(
+    orb_long_entry or orb_short_entry or mr_long or mr_short,
+    title   = "Any Signal",
+    message = "Gold ORB signal triggered"
+)
