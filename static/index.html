@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UltimateTradingBot — Control Center</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+/* ── Base ────────────────────────────────────────────────────── */
+:root {
+  --bg:       #0d1117;
+  --bg2:      #161b22;
+  --bg3:      #21262d;
+  --border:   #30363d;
+  --text:     #e6edf3;
+  --muted:    #8b949e;
+  --green:    #3fb950;
+  --red:      #f85149;
+  --amber:    #d29922;
+  --blue:     #58a6ff;
+  --purple:   #a371f7;
+  --teal:     #39d353;
+  --card-r:   10px;
+}
+* { box-sizing: border-box; }
+body  { background: var(--bg); color: var(--text); font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; font-size: 14px; margin: 0; }
+h6    { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 10px; }
+a     { color: var(--blue); text-decoration: none; }
+
+/* ── Login overlay ───────────────────────────────────────────── */
+#login-screen { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center; z-index:9999; }
+#login-box { background:var(--bg2); border:1px solid var(--border); border-radius:14px; padding:40px 48px; width:360px; text-align:center; }
+#login-box h2 { color:var(--blue); font-size:20px; margin-bottom:6px; }
+#login-box p  { color:var(--muted); font-size:13px; margin-bottom:24px; }
+#login-box input { width:100%; padding:10px 14px; background:var(--bg3); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; outline:none; }
+#login-box input:focus { border-color:var(--blue); }
+#login-btn { margin-top:14px; width:100%; padding:10px; background:var(--blue); color:#000; font-weight:700; border:none; border-radius:8px; cursor:pointer; font-size:15px; }
+#login-btn:hover { background:#79c0ff; }
+#login-error { color:var(--red); font-size:13px; margin-top:10px; min-height:18px; }
+
+/* ── Navbar ──────────────────────────────────────────────────── */
+#navbar { background:var(--bg2); border-bottom:1px solid var(--border); padding:0 20px; display:flex; align-items:center; justify-content:space-between; height:52px; position:sticky; top:0; z-index:100; }
+.nav-brand { display:flex; align-items:center; gap:10px; font-weight:700; font-size:16px; }
+.nav-brand i { color:var(--blue); }
+.badge-mode { padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700; letter-spacing:.05em; }
+.badge-demo { background:rgba(210,153,34,.15); color:var(--amber); border:1px solid rgba(210,153,34,.3); }
+.badge-live { background:rgba(248,81,73,.15); color:var(--red); border:1px solid rgba(248,81,73,.3); }
+.nav-status  { display:flex; align-items:center; gap:14px; }
+.status-dot  { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:5px; }
+.dot-green   { background:var(--green); box-shadow:0 0 6px var(--green); }
+.dot-amber   { background:var(--amber); box-shadow:0 0 6px var(--amber); }
+.dot-red     { background:var(--red);   box-shadow:0 0 6px var(--red);   }
+.dot-grey    { background:var(--muted); }
+#ts-label    { font-size:12px; color:var(--muted); }
+
+/* ── Tabs ────────────────────────────────────────────────────── */
+#tab-bar { background:var(--bg2); border-bottom:1px solid var(--border); padding:0 20px; display:flex; gap:0; }
+.tab-btn { background:none; border:none; color:var(--muted); padding:12px 18px; cursor:pointer; font-size:13px; border-bottom:2px solid transparent; transition:.15s; display:flex; align-items:center; gap:7px; }
+.tab-btn:hover  { color:var(--text); }
+.tab-btn.active { color:var(--blue); border-bottom-color:var(--blue); }
+.tab-pane { display:none; padding:18px 20px; }
+.tab-pane.active { display:block; }
+
+/* ── Cards ───────────────────────────────────────────────────── */
+.card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--card-r); padding:16px 18px; }
+.card-sm { padding:12px 16px; }
+
+/* ── Stat chips ──────────────────────────────────────────────── */
+.stats-row { display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:18px; }
+@media(max-width:1200px){ .stats-row { grid-template-columns:repeat(3,1fr); } }
+@media(max-width:600px) { .stats-row { grid-template-columns:repeat(2,1fr); } }
+.stat-card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--card-r); padding:14px 16px; }
+.stat-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px; }
+.stat-value { font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; line-height:1; }
+.stat-sub   { font-size:11px; color:var(--muted); margin-top:4px; }
+.text-green { color:var(--green); }
+.text-red   { color:var(--red); }
+.text-amber { color:var(--amber); }
+.text-blue  { color:var(--blue); }
+.text-muted { color:var(--muted); }
+
+/* ── Overview grid ───────────────────────────────────────────── */
+.overview-grid { display:grid; grid-template-columns:1fr 320px; gap:14px; }
+@media(max-width:900px){ .overview-grid { grid-template-columns:1fr; } }
+.overview-left  { display:flex; flex-direction:column; gap:14px; }
+.overview-right { display:flex; flex-direction:column; gap:14px; }
+
+/* ── Control buttons ─────────────────────────────────────────── */
+.ctrl-btn { width:100%; padding:10px 0; border:none; border-radius:8px; font-weight:700; font-size:13px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; transition:.15s; }
+.ctrl-btn:hover { filter:brightness(1.15); }
+.btn-pause   { background:rgba(210,153,34,.18); color:var(--amber); border:1px solid rgba(210,153,34,.35); }
+.btn-resume  { background:rgba(63,185,80,.18);  color:var(--green); border:1px solid rgba(63,185,80,.35); }
+.btn-flatten { background:rgba(248,81,73,.18);  color:var(--red);   border:1px solid rgba(248,81,73,.35); }
+.btn-stop    { background:rgba(248,81,73,.08);  color:var(--red);   border:1px solid rgba(248,81,73,.2);  }
+.btn-group-ctrl { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+
+/* ── Tables ──────────────────────────────────────────────────── */
+.data-table { width:100%; border-collapse:collapse; font-size:13px; }
+.data-table th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; font-weight:600; padding:7px 10px; border-bottom:1px solid var(--border); }
+.data-table td { padding:8px 10px; border-bottom:1px solid rgba(48,54,61,.6); vertical-align:middle; }
+.data-table tr:last-child td { border-bottom:none; }
+.data-table tr:hover td { background:rgba(88,166,255,.04); }
+.pill { display:inline-block; padding:2px 9px; border-radius:12px; font-size:11px; font-weight:600; }
+.pill-buy    { background:rgba(63,185,80,.15);  color:var(--green); }
+.pill-sell   { background:rgba(248,81,73,.15);  color:var(--red);   }
+.pill-pass   { background:rgba(63,185,80,.12);  color:var(--green); }
+.pill-fail   { background:rgba(248,81,73,.12);  color:var(--red);   }
+.pill-manual { background:rgba(88,166,255,.12); color:var(--blue);  }
+.pill-orb    { background:rgba(163,113,247,.12);color:var(--purple);}
+
+/* ── Progress bars ───────────────────────────────────────────── */
+.progress-bar-wrap { background:var(--bg3); border-radius:6px; height:6px; overflow:hidden; }
+.progress-bar-fill { height:100%; border-radius:6px; transition:width .4s; }
+.fill-green  { background:var(--green); }
+.fill-amber  { background:var(--amber); }
+.fill-red    { background:var(--red);   }
+
+/* ── Log viewer ──────────────────────────────────────────────── */
+.log-box { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px 14px; font-family:'Consolas','JetBrains Mono',monospace; font-size:12px; line-height:1.7; height:380px; overflow-y:auto; }
+.log-box::-webkit-scrollbar { width:5px; }
+.log-box::-webkit-scrollbar-track { background:var(--bg); }
+.log-box::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+.log-line { white-space:pre-wrap; word-break:break-all; }
+.log-line.err  { color:var(--red);   }
+.log-line.warn { color:var(--amber); }
+.log-line.info { color:var(--text);  }
+
+/* ── Signal log ──────────────────────────────────────────────── */
+.sig-row { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid rgba(48,54,61,.5); font-size:12px; }
+.sig-row:last-child { border-bottom:none; }
+.sig-time { color:var(--muted); min-width:62px; }
+.sig-source { font-size:10px; color:var(--muted); padding:1px 6px; background:var(--bg3); border-radius:4px; }
+
+/* ── Config form ─────────────────────────────────────────────── */
+.cfg-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px 24px; }
+@media(max-width:700px){ .cfg-grid { grid-template-columns:1fr; } }
+.cfg-field label { display:block; font-size:11px; color:var(--muted); margin-bottom:5px; text-transform:uppercase; letter-spacing:.05em; }
+.cfg-field input[type=number],
+.cfg-field input[type=text],
+.cfg-field select { width:100%; padding:8px 12px; background:var(--bg3); border:1px solid var(--border); border-radius:7px; color:var(--text); font-size:13px; outline:none; }
+.cfg-field input:focus, .cfg-field select:focus { border-color:var(--blue); }
+.toggle-row { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid rgba(48,54,61,.5); }
+.toggle-row:last-child { border-bottom:none; }
+.toggle-label { font-size:13px; color:var(--text); }
+.toggle-sub   { font-size:11px; color:var(--muted); }
+.switch { position:relative; display:inline-block; width:38px; height:21px; }
+.switch input { opacity:0; width:0; height:0; }
+.slider { position:absolute; cursor:pointer; inset:0; background:var(--bg3); border-radius:21px; border:1px solid var(--border); transition:.2s; }
+.slider:before { content:""; position:absolute; height:15px; width:15px; left:2px; bottom:2px; background:var(--muted); border-radius:50%; transition:.2s; }
+input:checked + .slider { background:rgba(63,185,80,.25); border-color:var(--green); }
+input:checked + .slider:before { transform:translateX(17px); background:var(--green); }
+
+/* ── News events ──────────────────────────────────────────────── */
+.news-item { display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid rgba(48,54,61,.5); }
+.news-item:last-child { border-bottom:none; }
+.news-time  { color:var(--amber); font-weight:600; min-width:56px; font-size:13px; }
+.news-title { flex:1; font-size:13px; }
+.news-badge { padding:2px 8px; border-radius:10px; font-size:10px; font-weight:700; background:rgba(248,81,73,.15); color:var(--red); }
+.blackout-banner { background:rgba(248,81,73,.1); border:1px solid rgba(248,81,73,.3); border-radius:8px; padding:10px 14px; color:var(--red); font-weight:600; display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+
+/* ── Equity chart ────────────────────────────────────────────── */
+.chart-wrap { position:relative; height:200px; }
+
+/* ── Misc ────────────────────────────────────────────────────── */
+.save-btn { background:var(--blue); color:#000; font-weight:700; border:none; border-radius:8px; padding:9px 22px; cursor:pointer; font-size:13px; }
+.save-btn:hover { background:#79c0ff; }
+.section-title { font-size:13px; font-weight:700; color:var(--text); margin-bottom:12px; display:flex; align-items:center; gap:8px; }
+.empty-state { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
+.conn-dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:4px; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════ LOGIN -->
+<div id="login-screen">
+  <div id="login-box">
+    <div style="font-size:32px;margin-bottom:12px;">⚡</div>
+    <h2>UltimateTradingBot</h2>
+    <p>Control Center — Enter your dashboard password</p>
+    <input type="password" id="login-pass" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button id="login-btn" onclick="doLogin()">Sign In</button>
+    <div id="login-error"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ NAVBAR -->
+<div id="navbar" style="display:none">
+  <div class="nav-brand">
+    <i class="fas fa-bolt"></i>
+    UltimateTradingBot
+    <span id="mode-badge" class="badge-mode badge-demo">DEMO</span>
+  </div>
+  <div class="nav-status">
+    <span><span id="status-dot" class="status-dot dot-grey"></span><span id="status-label">Connecting…</span></span>
+    <span id="ts-label">—</span>
+    <span><span id="ws-dot" class="conn-dot" style="background:var(--muted)"></span><span id="ws-label" style="color:var(--muted);font-size:12px">WS</span></span>
+    <button onclick="doLogout()" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer">Logout</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ TABS -->
+<div id="tab-bar" style="display:none">
+  <button class="tab-btn active" onclick="showTab('overview',this)"><i class="fas fa-gauge-high"></i> Overview</button>
+  <button class="tab-btn"        onclick="showTab('trades',  this)"><i class="fas fa-list-ul"></i> Trades</button>
+  <button class="tab-btn"        onclick="showTab('signals', this)"><i class="fas fa-signal"></i> Signals</button>
+  <button class="tab-btn"        onclick="showTab('config',  this)"><i class="fas fa-sliders"></i> Config</button>
+  <button class="tab-btn"        onclick="showTab('news',    this)"><i class="fas fa-newspaper"></i> News</button>
+  <button class="tab-btn"        onclick="showTab('logs',    this)"><i class="fas fa-terminal"></i> Logs</button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ CONTENT -->
+<div id="app" style="display:none">
+
+<!-- ── OVERVIEW ────────────────────────────────────────────────────── -->
+<div id="tab-overview" class="tab-pane active">
+
+  <!-- Stats row -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label"><i class="fas fa-wallet fa-xs"></i> Equity</div>
+      <div class="stat-value text-blue" id="s-equity">—</div>
+      <div class="stat-sub" id="s-session-start">Session —</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label"><i class="fas fa-chart-line fa-xs"></i> Day P&L</div>
+      <div class="stat-value" id="s-pnl">—</div>
+      <div class="stat-sub" id="s-pnl-pct">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label"><i class="fas fa-shield-halved fa-xs"></i> DD Buffer</div>
+      <div class="stat-value" id="s-buffer">—</div>
+      <div class="stat-sub">Prop firm safety</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label"><i class="fas fa-arrow-trend-down fa-xs"></i> Intraday DD</div>
+      <div class="stat-value" id="s-dd">—</div>
+      <div class="stat-sub" id="s-dd-limit">Limit —</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label"><i class="fas fa-repeat fa-xs"></i> Trades Today</div>
+      <div class="stat-value" id="s-trades">—</div>
+      <div class="stat-sub" id="s-winrate">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label"><i class="fas fa-exclamation-triangle fa-xs"></i> Consec Losses</div>
+      <div class="stat-value" id="s-losses">—</div>
+      <div class="stat-sub" id="s-of-status">OF: —</div>
+    </div>
+  </div>
+
+  <div class="overview-grid">
+    <!-- LEFT: chart + open trade -->
+    <div class="overview-left">
+
+      <!-- Equity Curve -->
+      <div class="card">
+        <h6><i class="fas fa-chart-area"></i> Equity Curve (Today)</h6>
+        <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
+      </div>
+
+      <!-- Open Trade -->
+      <div class="card" id="open-trade-card">
+        <h6><i class="fas fa-door-open"></i> Open Trade</h6>
+        <div id="open-trade-body">
+          <div class="empty-state"><i class="fas fa-circle-minus text-muted"></i> No open position</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- RIGHT: controls + positions -->
+    <div class="overview-right">
+
+      <!-- Controls -->
+      <div class="card">
+        <h6><i class="fas fa-gamepad"></i> Bot Controls</h6>
+        <div class="btn-group-ctrl" style="margin-bottom:8px">
+          <button class="ctrl-btn btn-pause"  onclick="sendControl('pause')">  <i class="fas fa-pause"></i>  Pause</button>
+          <button class="ctrl-btn btn-resume" onclick="sendControl('resume')"> <i class="fas fa-play"></i>   Resume</button>
+        </div>
+        <button class="ctrl-btn btn-flatten" style="margin-bottom:8px" onclick="confirmFlatten()"><i class="fas fa-hand-fist"></i> Flatten All Positions</button>
+        <button class="ctrl-btn btn-stop"    onclick="confirmStop()">  <i class="fas fa-power-off"></i> Stop Bot</button>
+      </div>
+
+      <!-- Prop Firm Progress -->
+      <div class="card">
+        <h6><i class="fas fa-trophy"></i> Prop Firm Progress</h6>
+        <div style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px">
+            <span>Daily Loss Used</span><span id="prog-loss-pct">0%</span>
+          </div>
+          <div class="progress-bar-wrap"><div id="prog-loss-bar" class="progress-bar-fill fill-red" style="width:0%"></div></div>
+        </div>
+        <div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px">
+            <span>DD Buffer Remaining</span><span id="prog-buf-pct">100%</span>
+          </div>
+          <div class="progress-bar-wrap"><div id="prog-buf-bar" class="progress-bar-fill fill-green" style="width:100%"></div></div>
+        </div>
+        <div style="margin-top:10px;font-size:12px;color:var(--muted)" id="prop-firm-name">—</div>
+      </div>
+
+      <!-- Today Mini-Summary -->
+      <div class="card">
+        <h6><i class="fas fa-calendar-day"></i> Today's Summary</h6>
+        <table class="data-table">
+          <tr><td style="color:var(--muted)">Wins</td>        <td id="sum-wins"  class="text-green text-end">—</td></tr>
+          <tr><td style="color:var(--muted)">Losses</td>      <td id="sum-losses"class="text-red   text-end">—</td></tr>
+          <tr><td style="color:var(--muted)">Win Rate</td>    <td id="sum-wr"    class="text-end">—</td></tr>
+          <tr><td style="color:var(--muted)">OF Pass Rate</td><td id="sum-of"    class="text-end">—</td></tr>
+          <tr><td style="color:var(--muted)">News Blackout</td><td id="sum-news" class="text-end">—</td></tr>
+        </table>
+      </div>
+
+    </div>
+  </div>
+</div><!-- /overview -->
+
+<!-- ── TRADES ────────────────────────────────────────────────────── -->
+<div id="tab-trades" class="tab-pane">
+  <div class="card">
+    <div class="section-title"><i class="fas fa-list-ul"></i> Trade History</div>
+    <div style="overflow-x:auto">
+      <table class="data-table">
+        <thead><tr>
+          <th>Time</th><th>Dir</th><th>Instrument</th><th>Entry</th>
+          <th>Exit</th><th>SL</th><th>TP1</th><th>Contracts</th>
+          <th>Risk</th><th>P&L</th><th>Status</th>
+        </tr></thead>
+        <tbody id="trades-body"><tr><td colspan="11" class="empty-state">No trades yet today</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ── SIGNALS ───────────────────────────────────────────────────── -->
+<div id="tab-signals" class="tab-pane">
+  <div class="card">
+    <div class="section-title"><i class="fas fa-signal"></i> Signal Log (last 60)</div>
+    <div id="signals-body">
+      <div class="empty-state">No signals yet</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── CONFIG ────────────────────────────────────────────────────── -->
+<div id="tab-config" class="tab-pane">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+
+    <!-- Risk -->
+    <div class="card">
+      <div class="section-title"><i class="fas fa-shield-halved"></i> Risk Management</div>
+      <div class="cfg-grid">
+        <div class="cfg-field">
+          <label>Risk / Trade (%)</label>
+          <input type="number" id="cfg-risk" step="0.001" min="0.001" max="0.004" placeholder="0.003">
+        </div>
+        <div class="cfg-field">
+          <label>Daily Loss Limit (%)</label>
+          <input type="number" id="cfg-dl"   step="0.001" min="0.001" max="0.02" placeholder="0.0085">
+        </div>
+        <div class="cfg-field">
+          <label>Daily Profit Target (%)</label>
+          <input type="number" id="cfg-pt"   step="0.001" min="0.005" max="0.05" placeholder="0.012">
+        </div>
+        <div class="cfg-field">
+          <label>Max Trades / Day</label>
+          <input type="number" id="cfg-mt"   step="1" min="1" max="10" placeholder="3">
+        </div>
+        <div class="cfg-field">
+          <label>SL ATR Multiplier</label>
+          <input type="number" id="cfg-sl"   step="0.1" min="0.5" max="2.0" placeholder="1.0">
+        </div>
+        <div class="cfg-field">
+          <label>OR Min Range (pts)</label>
+          <input type="number" id="cfg-or"   step="0.1" min="0.5" max="10" placeholder="1.5">
+        </div>
+      </div>
+    </div>
+
+    <!-- Order Flow -->
+    <div class="card">
+      <div class="section-title"><i class="fas fa-water"></i> Order Flow Filter</div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">Enable Order Flow Filter</div><div class="toggle-sub">Master switch — enable AFTER baseline evaluation</div></div>
+        <label class="switch"><input type="checkbox" id="cfg-of-enabled"><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">Require Positive Cumulative Delta</div><div class="toggle-sub">Session delta must agree with direction</div></div>
+        <label class="switch"><input type="checkbox" id="cfg-of-delta"><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">Require Bar Delta Confirmation</div><div class="toggle-sub">Breakout bar delta must agree</div></div>
+        <label class="switch"><input type="checkbox" id="cfg-of-bar"><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">Require Absorption at OR Boundary</div><div class="toggle-sub">Failed test of OR level (powerful but rare)</div></div>
+        <label class="switch"><input type="checkbox" id="cfg-of-abs"><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">Reject on Delta Divergence</div><div class="toggle-sub">Block when price and delta disagree</div></div>
+        <label class="switch"><input type="checkbox" id="cfg-of-div"><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">Allow Missing OF Data</div><div class="toggle-sub">Pass signal if TradingView didn't send OF fields</div></div>
+        <label class="switch"><input type="checkbox" id="cfg-of-miss"><span class="slider"></span></label>
+      </div>
+    </div>
+
+    <!-- News filter -->
+    <div class="card">
+      <div class="section-title"><i class="fas fa-newspaper"></i> News Filter</div>
+      <div class="cfg-grid">
+        <div class="cfg-field">
+          <label>Blackout Before Event (min)</label>
+          <input type="number" id="cfg-nb-before" step="5" min="0" max="120" placeholder="45">
+        </div>
+        <div class="cfg-field">
+          <label>Blackout After Event (min)</label>
+          <input type="number" id="cfg-nb-after"  step="5" min="0" max="120" placeholder="45">
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Add Manual Blackout (HH:MM ET)</label>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <input type="text" id="news-time"  placeholder="08:30" style="flex:1;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:13px;outline:none">
+          <input type="text" id="news-title" placeholder="CPI Release" style="flex:2;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:13px;outline:none">
+          <button onclick="addNewsEvent()" style="padding:8px 14px;background:var(--amber);color:#000;border:none;border-radius:7px;cursor:pointer;font-weight:700">Add</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Instrument -->
+    <div class="card">
+      <div class="section-title"><i class="fas fa-coins"></i> Instrument</div>
+      <div class="cfg-grid">
+        <div class="cfg-field">
+          <label>Default Instrument</label>
+          <select id="cfg-inst">
+            <option value="MGC">MGC — Micro Gold ($10/pt)</option>
+            <option value="GC">GC — Gold ($100/pt)</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:14px;padding:12px;background:var(--bg3);border-radius:8px;font-size:12px;color:var(--muted)">
+        ⚠️ Changing the instrument mid-session will apply to the <em>next</em> signal. Any open position in the old instrument remains unaffected.
+      </div>
+    </div>
+
+  </div>
+
+  <div style="margin-top:16px;display:flex;gap:12px;align-items:center">
+    <button class="save-btn" onclick="saveConfig()"><i class="fas fa-save"></i> Save Configuration</button>
+    <span id="cfg-saved" style="color:var(--green);font-size:13px;display:none"><i class="fas fa-check"></i> Saved!</span>
+  </div>
+</div><!-- /config -->
+
+<!-- ── NEWS ─────────────────────────────────────────────────────── -->
+<div id="tab-news" class="tab-pane">
+  <div class="card">
+    <div class="section-title"><i class="fas fa-newspaper"></i> Today's Economic Calendar</div>
+    <div id="blackout-banner" class="blackout-banner" style="display:none"><i class="fas fa-ban"></i> NEWS BLACKOUT ACTIVE — no new entries</div>
+    <div id="news-body">
+      <div class="empty-state">Loading events…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── LOGS ──────────────────────────────────────────────────────── -->
+<div id="tab-logs" class="tab-pane">
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div class="section-title" style="margin:0"><i class="fas fa-terminal"></i> Live Log</div>
+      <div style="display:flex;gap:8px">
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="log-autoscroll" checked> Auto-scroll
+        </label>
+        <button onclick="clearLogs()" style="background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer">Clear</button>
+      </div>
+    </div>
+    <div class="log-box" id="log-box"></div>
+  </div>
+</div>
+
+</div><!-- /app -->
+
+<!-- ═══════════════════════════════════════════════════════════ SCRIPTS -->
+<script>
+'use strict';
+
+// ── State ─────────────────────────────────────────────────────────────
+let ws = null;
+let wsConnected = false;
+let equityChart = null;
+let chartLabels = [];
+let chartData   = [];
+let pollTimer   = null;
+
+// ── Login ─────────────────────────────────────────────────────────────
+async function doLogin() {
+  const pass = document.getElementById('login-pass').value;
+  const err  = document.getElementById('login-error');
+  try {
+    const r = await fetch('/api/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password: pass})
+    });
+    if (r.ok) {
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('navbar').style.display = 'flex';
+      document.getElementById('tab-bar').style.display = 'flex';
+      document.getElementById('app').style.display = 'block';
+      initDashboard();
+    } else {
+      err.textContent = 'Invalid password';
+    }
+  } catch(e) { err.textContent = 'Connection error'; }
+}
+
+async function doLogout() {
+  await fetch('/api/logout', {method:'POST'});
+  location.reload();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────
+function initDashboard() {
+  initChart();
+  connectWS();
+  // Fallback REST poll every 5s if WS drops
+  pollTimer = setInterval(() => { if (!wsConnected) fetchState(); }, 5000);
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────
+function showTab(name, btn) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn') .forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  btn.classList.add('active');
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    wsConnected = true;
+    setWsIndicator(true);
+  };
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'state') renderState(msg.data);
+      if (msg === 'ping') ws.send('pong');
+    } catch(_) {}
+  };
+  ws.onclose = () => {
+    wsConnected = false;
+    setWsIndicator(false);
+    setTimeout(connectWS, 3000); // auto-reconnect
+  };
+  ws.onerror = () => { wsConnected = false; setWsIndicator(false); };
+}
+
+function setWsIndicator(ok) {
+  const dot = document.getElementById('ws-dot');
+  const lbl = document.getElementById('ws-label');
+  dot.style.background = ok ? 'var(--green)' : 'var(--red)';
+  lbl.style.color      = ok ? 'var(--green)' : 'var(--red)';
+}
+
+async function fetchState() {
+  try {
+    const r = await fetch('/api/state');
+    if (r.status === 401) { location.reload(); return; }
+    const d = await r.json();
+    renderState(d);
+  } catch(_) {}
+}
+
+// ── Render ────────────────────────────────────────────────────────────
+function renderState(d) {
+  const s = d.status  || {};
+  const a = d.account || {};
+  const t = d.trading || {};
+
+  // Navbar
+  document.getElementById('ts-label').textContent = s.ts || '—';
+  document.getElementById('mode-badge').textContent = s.demo_mode ? 'DEMO' : 'LIVE';
+  document.getElementById('mode-badge').className = 'badge-mode ' + (s.demo_mode ? 'badge-demo' : 'badge-live');
+
+  // Status dot
+  const dot = document.getElementById('status-dot');
+  const lbl = document.getElementById('status-label');
+  if (s.is_shutdown_today)       { dot.className='status-dot dot-red';   lbl.textContent='SHUTDOWN'; }
+  else if (!s.is_running)        { dot.className='status-dot dot-grey';  lbl.textContent='Stopped'; }
+  else if (s.is_paused)          { dot.className='status-dot dot-amber'; lbl.textContent='Paused'; }
+  else                           { dot.className='status-dot dot-green'; lbl.textContent='Running'; }
+
+  // Stats
+  const eq = a.equity || 0;
+  const pnl = a.daily_pnl || 0;
+  document.getElementById('s-equity').textContent = '$' + fmt(eq);
+  document.getElementById('s-session-start').textContent = 'Start: $' + fmt(a.session_start||0);
+  const pnlEl = document.getElementById('s-pnl');
+  pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+  pnlEl.className   = 'stat-value ' + (pnl >= 0 ? 'text-green' : 'text-red');
+  document.getElementById('s-pnl-pct').textContent = (a.daily_pnl_pct >= 0 ? '+' : '') + (a.daily_pnl_pct||0).toFixed(3) + '%';
+
+  const buf = a.dd_buffer_pct || 0;
+  const bufEl = document.getElementById('s-buffer');
+  bufEl.textContent = buf.toFixed(1) + '%';
+  bufEl.className   = 'stat-value ' + (buf > 60 ? 'text-green' : buf > 30 ? 'text-amber' : 'text-red');
+
+  const dd = a.intraday_dd_pct || 0;
+  const ddEl = document.getElementById('s-dd');
+  ddEl.textContent = dd.toFixed(3) + '%';
+  ddEl.className   = 'stat-value ' + (dd < 0.3 ? 'text-green' : dd < 0.5 ? 'text-amber' : 'text-red');
+  document.getElementById('s-dd-limit').textContent = 'Limit $' + fmt(a.daily_loss_limit||0);
+
+  document.getElementById('s-trades').textContent = (t.daily_trades||0) + ' / ' + (t.max_trades||3);
+  document.getElementById('s-winrate').textContent = 'WR: ' + (t.win_rate||0) + '%';
+  const consec = t.consecutive_losses || 0;
+  const consecEl = document.getElementById('s-losses');
+  consecEl.textContent = consec;
+  consecEl.className   = 'stat-value ' + (consec === 0 ? 'text-green' : consec === 1 ? 'text-amber' : 'text-red');
+  document.getElementById('s-of-status').textContent = t.of_enabled ? '📊 OF: ' + t.of_pass_rate : 'OF: off';
+
+  // Prop firm progress
+  const lossUsed = a.session_start > 0 ? Math.max(0, (a.session_start - eq) / (a.daily_loss_limit||1) * 100) : 0;
+  document.getElementById('prog-loss-bar').style.width = Math.min(lossUsed, 100) + '%';
+  document.getElementById('prog-loss-pct').textContent = lossUsed.toFixed(0) + '%';
+  document.getElementById('prog-buf-bar').style.width = buf + '%';
+  document.getElementById('prog-buf-pct').textContent = buf.toFixed(1) + '%';
+  document.getElementById('prop-firm-name').textContent = 'Prop firm: ' + (s.prop_firm||'—').toUpperCase().replace('_', ' ');
+
+  // Summary
+  document.getElementById('sum-wins').textContent   = t.winning_trades || 0;
+  document.getElementById('sum-losses').textContent = t.losing_trades  || 0;
+  document.getElementById('sum-wr').textContent     = (t.win_rate||0) + '%';
+  document.getElementById('sum-of').textContent     = t.of_pass_rate || '—';
+  const bkout = (d.news && d.news.blackout_active);
+  document.getElementById('sum-news').textContent   = bkout ? '🚫 Active' : '✅ Clear';
+  document.getElementById('sum-news').style.color   = bkout ? 'var(--red)' : 'var(--green)';
+
+  // Open trade
+  renderOpenTrade(d.open_trade);
+
+  // Equity curve
+  if (d.equity_curve && d.equity_curve.length > 0) updateChart(d.equity_curve);
+
+  // Trades
+  renderTrades(d.trades || []);
+
+  // Signals
+  renderSignals(d.signals || []);
+
+  // News
+  renderNews(d.news || {});
+
+  // Logs
+  renderLogs(d.logs || []);
+
+  // Config (only update fields if user isn't editing)
+  if (document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {
+    loadConfigForm(d.config || {});
+  }
+}
+
+function fmt(n) {
+  return Number(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+// ── Open Trade ────────────────────────────────────────────────────────
+function renderOpenTrade(trade) {
+  const el = document.getElementById('open-trade-body');
+  if (!trade) {
+    el.innerHTML = '<div class="empty-state"><i class="fas fa-circle-minus text-muted"></i> No open position</div>';
+    return;
+  }
+  const dir   = trade.action === 'BUY' ? '🟢 LONG' : '🔴 SHORT';
+  const pnl   = trade.unrealized_pnl || 0;
+  const pnlCl = pnl >= 0 ? 'text-green' : 'text-red';
+  el.innerHTML = `
+    <table class="data-table">
+      <tr><td class="text-muted">Direction</td><td><b>${dir}</b></td></tr>
+      <tr><td class="text-muted">Instrument</td><td>${trade.instrument||'—'}</td></tr>
+      <tr><td class="text-muted">Contracts</td><td>${trade.contracts||'—'}</td></tr>
+      <tr><td class="text-muted">Entry Price</td><td>${(trade.entry_price||0).toFixed(2)}</td></tr>
+      <tr><td class="text-muted">Stop Loss</td><td class="text-red">${(trade.sl_price||0).toFixed(2)}</td></tr>
+      <tr><td class="text-muted">TP1</td><td class="text-green">${(trade.tp1_price||0).toFixed(2)}</td></tr>
+      <tr><td class="text-muted">TP2</td><td class="text-green">${(trade.tp2_price||0).toFixed(2)}</td></tr>
+      <tr><td class="text-muted">Risk</td><td>$${(trade.risk_amount||0).toFixed(2)} (${(trade.risk_pct||0).toFixed(3)}%)</td></tr>
+      <tr><td class="text-muted">Signal</td><td>${trade.signal_type||'—'} <span class="sig-source">${trade.of_summary||''}</span></td></tr>
+    </table>`;
+}
+
+// ── Trade history ─────────────────────────────────────────────────────
+function renderTrades(trades) {
+  const tbody = document.getElementById('trades-body');
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No trades yet today</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(t => {
+    const pnl   = t.pnl || 0;
+    const pnlCl = pnl > 0 ? 'text-green' : pnl < 0 ? 'text-red' : '';
+    const dir   = t.action === 'BUY'
+      ? '<span class="pill pill-buy">LONG</span>'
+      : '<span class="pill pill-sell">SHORT</span>';
+    return `<tr>
+      <td class="text-muted">${(t.entry_time||'').substring(11,19)}</td>
+      <td>${dir}</td>
+      <td>${t.instrument||'—'}</td>
+      <td>${(t.entry_price||0).toFixed(2)}</td>
+      <td>${t.exit_price ? t.exit_price.toFixed(2) : '—'}</td>
+      <td class="text-red">${(t.sl_price||0).toFixed(2)}</td>
+      <td class="text-green">${(t.tp1_price||0).toFixed(2)}</td>
+      <td>${t.contracts||'—'}</td>
+      <td>$${(t.risk_amount||0).toFixed(2)}</td>
+      <td class="${pnlCl}">${pnl !== 0 ? (pnl > 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2) : '—'}</td>
+      <td><span class="pill ${t.status==='tp1'||t.status==='tp2'?'pill-pass':t.status==='sl'?'pill-fail':'pill-manual'}">${t.status||'open'}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Signal log ────────────────────────────────────────────────────────
+function renderSignals(signals) {
+  const el = document.getElementById('signals-body');
+  if (!signals.length) { el.innerHTML = '<div class="empty-state">No signals yet</div>'; return; }
+  const rows = [...signals].reverse().map(s => {
+    const dir = s.action === 'BUY'
+      ? '<span class="pill pill-buy">BUY</span>'
+      : '<span class="pill pill-sell">SELL</span>';
+    const res = s.passed
+      ? '<span class="pill pill-pass">✓ PASS</span>'
+      : `<span class="pill pill-fail">✗ ${s.gate||'FAIL'}</span>`;
+    const src = s.source ? `<span class="sig-source">${s.source}</span>` : '';
+    const type = s.signal_type === 'ORB' ? '<span class="pill pill-orb">ORB</span>' : `<span class="pill pill-manual">${s.signal_type}</span>`;
+    return `<div class="sig-row">
+      <span class="sig-time">${s.t||''}</span>
+      ${dir} ${type} <b>${s.instrument||''}</b> @ ${(s.price||0).toFixed(2)}
+      ${res} ${src}
+      ${s.of_summary ? `<span style="font-size:11px;color:var(--muted)">${s.of_summary}</span>` : ''}
+    </div>`;
+  }).join('');
+  el.innerHTML = rows;
+}
+
+// ── News ──────────────────────────────────────────────────────────────
+function renderNews(news) {
+  const banner = document.getElementById('blackout-banner');
+  const body   = document.getElementById('news-body');
+  banner.style.display = news.blackout_active ? 'flex' : 'none';
+  if (news.blackout_active && news.next_event_min !== null) {
+    banner.innerHTML = `<i class="fas fa-ban"></i> NEWS BLACKOUT ACTIVE — trading suspended. Next event in ${news.next_event_min} min`;
+  }
+  const events = news.events || [];
+  if (!events.length) {
+    body.innerHTML = '<div class="empty-state"><i class="fas fa-circle-check text-green"></i> No high-impact events today — clear to trade</div>';
+    return;
+  }
+  body.innerHTML = events.map(e =>
+    `<div class="news-item">
+      <div class="news-time">${e.time||'?'}</div>
+      <div class="news-title">${e.title||'—'}</div>
+      <div class="news-badge">${e.impact||'HIGH'}</div>
+    </div>`
+  ).join('');
+}
+
+// ── Logs ──────────────────────────────────────────────────────────────
+let logLines = [];
+function renderLogs(lines) {
+  const box      = document.getElementById('log-box');
+  const newLines = lines.filter(l => !logLines.includes(l));
+  logLines = lines;
+  if (!newLines.length) return;
+  newLines.forEach(l => {
+    const div = document.createElement('div');
+    div.className = 'log-line ' +
+      (l.includes('[ERROR') || l.includes('[CRITICAL') ? 'err'  :
+       l.includes('[WARNING') ? 'warn' : 'info');
+    div.textContent = l;
+    box.appendChild(div);
+  });
+  if (document.getElementById('log-autoscroll').checked) {
+    box.scrollTop = box.scrollHeight;
+  }
+}
+function clearLogs() {
+  document.getElementById('log-box').innerHTML = '';
+  logLines = [];
+}
+
+// ── Chart ─────────────────────────────────────────────────────────────
+function initChart() {
+  const ctx = document.getElementById('equity-chart').getContext('2d');
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels:   chartLabels,
+      datasets: [{
+        data:            chartData,
+        borderColor:     '#58a6ff',
+        backgroundColor: 'rgba(88,166,255,.08)',
+        borderWidth:     2,
+        fill:            true,
+        tension:         0.3,
+        pointRadius:     0,
+        pointHoverRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: {display:false}, tooltip: {
+        callbacks: { label: ctx => '$' + ctx.raw.toLocaleString('en-US',{minimumFractionDigits:2}) }
+      }},
+      scales: {
+        x: { grid:{color:'rgba(48,54,61,.5)'}, ticks:{color:'#8b949e',maxTicksLimit:8,font:{size:11}} },
+        y: { grid:{color:'rgba(48,54,61,.5)'}, ticks:{color:'#8b949e',font:{size:11},
+          callback: v => '$' + v.toLocaleString() } }
+      }
+    }
+  });
+}
+
+function updateChart(curve) {
+  chartLabels = curve.map(p => p.t);
+  chartData   = curve.map(p => p.v);
+  equityChart.data.labels   = chartLabels;
+  equityChart.data.datasets[0].data = chartData;
+  // Colour the line based on whether equity is above/below session start
+  const first = chartData[0] || 0;
+  const last  = chartData[chartData.length - 1] || 0;
+  equityChart.data.datasets[0].borderColor     = last >= first ? '#3fb950' : '#f85149';
+  equityChart.data.datasets[0].backgroundColor = last >= first ? 'rgba(63,185,80,.07)' : 'rgba(248,81,73,.07)';
+  equityChart.update('none');
+}
+
+// ── Config form ───────────────────────────────────────────────────────
+function loadConfigForm(c) {
+  setVal('cfg-risk',      c.risk_per_trade_pct);
+  setVal('cfg-dl',        c.daily_loss_limit_pct);
+  setVal('cfg-pt',        c.daily_profit_target_pct);
+  setVal('cfg-mt',        c.max_trades_per_day);
+  setVal('cfg-sl',        c.sl_atr_default);
+  setVal('cfg-or',        c.or_min_range_points);
+  setVal('cfg-inst',      c.instrument);
+  setVal('cfg-nb-before', c.news_blackout_before_min);
+  setVal('cfg-nb-after',  c.news_blackout_after_min);
+  setCheck('cfg-of-enabled', c.order_flow_enabled);
+  setCheck('cfg-of-delta',   c.of_require_positive_delta);
+  setCheck('cfg-of-bar',     c.of_require_bar_delta);
+  setCheck('cfg-of-abs',     c.of_require_absorption);
+  setCheck('cfg-of-div',     c.of_require_no_divergence);
+  setCheck('cfg-of-miss',    c.of_allow_missing_data);
+}
+function setVal(id, v)   { const el = document.getElementById(id); if (el && v !== undefined) el.value = v; }
+function setCheck(id, v) { const el = document.getElementById(id); if (el) el.checked = !!v; }
+
+async function saveConfig() {
+  const updates = {
+    risk_per_trade_pct:      parseFloat(document.getElementById('cfg-risk').value),
+    daily_loss_limit_pct:    parseFloat(document.getElementById('cfg-dl').value),
+    daily_profit_target_pct: parseFloat(document.getElementById('cfg-pt').value),
+    max_trades_per_day:      parseInt(  document.getElementById('cfg-mt').value),
+    sl_atr_default:          parseFloat(document.getElementById('cfg-sl').value),
+    or_min_range_points:     parseFloat(document.getElementById('cfg-or').value),
+    order_flow_enabled:      document.getElementById('cfg-of-enabled').checked,
+    of_require_positive_delta: document.getElementById('cfg-of-delta').checked,
+    of_require_bar_delta:    document.getElementById('cfg-of-bar').checked,
+    of_require_absorption:   document.getElementById('cfg-of-abs').checked,
+    of_require_no_divergence: document.getElementById('cfg-of-div').checked,
+    of_allow_missing_data:   document.getElementById('cfg-of-miss').checked,
+    news_blackout_before_min: parseInt(document.getElementById('cfg-nb-before').value),
+    news_blackout_after_min:  parseInt(document.getElementById('cfg-nb-after').value),
+  };
+  const r = await fetch('/api/config', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({updates})
+  });
+  if (r.ok) {
+    const saved = document.getElementById('cfg-saved');
+    saved.style.display = 'inline';
+    setTimeout(() => saved.style.display = 'none', 2500);
+  }
+}
+
+async function addNewsEvent() {
+  const t = document.getElementById('news-time').value.trim();
+  const n = document.getElementById('news-title').value.trim() || 'Manual Event';
+  if (!t) return;
+  await fetch('/api/news/add', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({time_et: t, title: n})
+  });
+  document.getElementById('news-time').value  = '';
+  document.getElementById('news-title').value = '';
+}
+
+// ── Control ───────────────────────────────────────────────────────────
+async function sendControl(action) {
+  await fetch(`/api/control/${action}`, {method:'POST'});
+}
+
+function confirmFlatten() {
+  if (confirm('⚠️  FLATTEN ALL POSITIONS?\n\nThis will market-close every open position immediately. This cannot be undone.')) {
+    sendControl('flatten');
+  }
+}
+
+function confirmStop() {
+  if (confirm('⚠️  STOP THE BOT?\n\nAll positions will be closed and the bot will shut down.')) {
+    sendControl('stop');
+  }
+}
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
