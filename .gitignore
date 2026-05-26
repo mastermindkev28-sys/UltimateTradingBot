@@ -1,29 +1,28 @@
-# Secrets — NEVER COMMIT
-.env
-
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-venv/
-.venv/
-*.egg-info/
-dist/
-build/
-*.egg
-
-# Logs (keep structure, not content)
-logs/*.log
-logs/daily_reports/*.json
-
-# OS
-.DS_Store
-Thumbs.db
 
 # IDE
-.vscode/
-.idea/
-*.swp
+# Logs (keep structure, not content)
+# OS
+# Python
+# Secrets — NEVER COMMIT
+*.egg
+*.egg-info/
+*.py[cod]
+*.pyd
+*.pyo
 *.swo
+*.swp
+.DS_Store
+.Python
+.env
+.env*
+.env.test
+.idea/
+.venv/
+.vscode/
+Thumbs.db
+__pycache__/
+build/
+dist/
+logs/*.log
+logs/daily_reports/*.json
+venv/
