@@ -47,7 +47,7 @@ from typing import Any, Callable, Coroutine, Optional
 import aiohttp
 
 import config
-from bot_state import BotState, get_state
+from bot_state import BotState
 
 logger = logging.getLogger(__name__)
 

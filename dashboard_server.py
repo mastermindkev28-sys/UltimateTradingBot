@@ -29,7 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import config
-from bot_state import BotState, get_state
+from bot_state import BotState
 
 logger = logging.getLogger(__name__)
 
