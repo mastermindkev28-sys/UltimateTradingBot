@@ -22,10 +22,12 @@ python-dotenv>=1.0.0,<2.0
 # ── Timezone handling ────────────────────────────────
 pytz>=2024.1
 
-# ── Numerical / indicators (optional local calc) ─────
+# ── Numerical / indicators ───────────────────────────
+# All indicators (ATR, RSI, EMA, ADX, VWAP) are computed in pure
+# Python inside strategy_logic.py — no pandas-ta / numba needed.
+# numpy is kept for optional numerical work; pandas for data frames.
 numpy>=1.26.0,<3.0
 pandas>=2.1.0,<3.0
-pandas-ta>=0.3.14b       # technical indicators (ATR, RSI, EMA, ADX)
 
 # ── Logging / utilities ──────────────────────────────
 colorlog>=6.8.0           # coloured console output
