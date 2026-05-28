@@ -215,8 +215,14 @@ class RiskManager:
         return hit
 
     def is_daily_profit_target_hit(self) -> bool:
-        """Return True if we've reached the daily profit goal (stop trading early)."""
+        """Return True if we've reached the daily profit goal (stop trading early).
+
+        If DAILY_PROFIT_TARGET_USD > 0 that fixed dollar amount takes precedence;
+        otherwise the percentage-based target is used.
+        """
         gain = self.current_equity - self.session_start_equity
+        if config.DAILY_PROFIT_TARGET_USD > 0:
+            return gain >= config.DAILY_PROFIT_TARGET_USD
         target = self.session_start_equity * config.DAILY_PROFIT_TARGET_PCT
         return gain >= target
 

@@ -213,15 +213,18 @@ class DemoSimulator:
             self.state.daily_trades += 1
 
     def _add_log_line(self) -> None:
+        pnl = self.equity - self.session_start
         messages = [
-            ("INFO",    "Monitor loop: equity=$%.2f  pnl=%.2f%%" % (
-                self.equity, (self.equity - self.session_start) / self.session_start * 100)),
+            ("INFO",    "Monitor loop: equity=$%.2f  pnl=$%.2f" % (self.equity, pnl)),
             ("INFO",    "News calendar: next event in %d min" % max(1, 35 - self.tick // 3)),
             ("DEBUG",   "WebSocket heartbeat OK"),
             ("INFO",    "Waiting for TradingView signal …"),
             ("INFO",    "Order flow filter: OF disabled — passthrough"),
-            ("WARNING", "Intraday drawdown: %.2f%%" % (
-                (self.high_water - self.equity) / self.high_water * 100)),
+            ("INFO",    "Session window: %s–%s ET | profit target: $%.0f" % (
+                os.getenv("SESSION_START_ET", "09:00"),
+                os.getenv("SESSION_END_ET",   "11:00"),
+                float(os.getenv("DAILY_PROFIT_TARGET_USD", "500")),
+            )),
         ]
         level, msg = random.choice(messages)
         self.state.add_log(level, msg)
@@ -230,8 +233,51 @@ class DemoSimulator:
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# Session defaults: 6am–8am PST = 9am–11am ET
+os.environ.setdefault("SESSION_START_ET",          "09:00")
+os.environ.setdefault("SESSION_END_ET",            "11:00")
+os.environ.setdefault("POSITION_CLOSE_ET",         "10:50")
+os.environ.setdefault("OPENING_RANGE_END_ET",      "09:30")
+os.environ.setdefault("DAILY_PROFIT_TARGET_USD",   "500")
+
+
 async def _amain() -> None:
+    import config as _cfg
+
     state = BotState.get()
+
+    profit_target = float(os.getenv("DAILY_PROFIT_TARGET_USD", "500"))
+    session_start_et = os.getenv("SESSION_START_ET", "09:00")
+    session_end_et   = os.getenv("SESSION_END_ET",   "11:00")
+    tz_et  = pytz.timezone("America/New_York")
+    tz_pst = pytz.timezone("America/Los_Angeles")
+
+    # ── Wait for session open if outside window ───────────────────────────────
+    now_et = datetime.now(tz_et)
+    start_h, start_m = map(int, session_start_et.split(":"))
+    end_h,   end_m   = map(int, session_end_et.split(":"))
+    from datetime import time as dtime
+    session_open  = dtime(start_h, start_m)
+    session_close = dtime(end_h,   end_m)
+    current_t     = now_et.time()
+
+    if current_t < session_open:
+        wait_sec = (
+            (start_h * 60 + start_m) - (current_t.hour * 60 + current_t.minute)
+        ) * 60 - current_t.second
+        now_pst = datetime.now(tz_pst)
+        print(f"\n  ⏳  Outside session window — waiting until "
+              f"{session_start_et} ET ({start_h - 3:02d}:{start_m:02d} PST)")
+        print(f"     Current time: {now_pst.strftime('%I:%M %p')} PST "
+              f"| Opens in {wait_sec // 60}m {wait_sec % 60}s")
+        print("     (Ctrl+C to cancel)\n")
+        await asyncio.sleep(wait_sec)
+    elif current_t >= session_close:
+        print(f"\n  ⛔  Session already closed for today "
+              f"({session_end_et} ET / {end_h - 3:02d}:{end_m:02d} PST).")
+        print("     Come back tomorrow or adjust SESSION_END_ET in .env\n")
+        return
 
     # ── Prime state ───────────────────────────────────────────────────────────
     state.set_running(True)
@@ -243,25 +289,58 @@ async def _amain() -> None:
     state.account_id        = 999999
 
     sim = DemoSimulator(state)
-    sim._update_equity()   # set initial equity immediately
+    sim._update_equity()
 
     # ── Start dashboard ───────────────────────────────────────────────────────
     dashboard = DashboardServer(state)
     dashboard.start()
 
-    port = int(os.getenv("DASHBOARD_PORT", "8088"))
+    now_pst = datetime.now(tz_pst)
+    port    = int(os.getenv("DASHBOARD_PORT", "8088"))
     print()
-    print("  ╔══════════════════════════════════════════════════╗")
-    print("  ║        UltimateTradingBot — DEMO MODE            ║")
-    print("  ╠══════════════════════════════════════════════════╣")
-    print(f"  ║  Dashboard →  http://localhost:{port}              ║")
-    print("  ║  Password  →  demo                              ║")
-    print("  ║                                                  ║")
-    print("  ║  Ctrl+C to stop                                  ║")
-    print("  ╚══════════════════════════════════════════════════╝")
+    print("  ╔═════════════════════════════════════════════════════╗")
+    print("  ║        UltimateTradingBot — DEMO MODE               ║")
+    print("  ╠═════════════════════════════════════════════════════╣")
+    print(f"  ║  Dashboard  →  http://localhost:{port}               ║")
+    print("  ║  Password   →  demo                                 ║")
+    print(f"  ║  Session    →  {session_start_et} – {session_end_et} ET "
+          f"({start_h-3:02d}:00 – {end_h-3:02d}:00 PST)   ║")
+    print(f"  ║  Auto-close →  +${profit_target:.0f} profit target               ║")
+    print("  ║                                                     ║")
+    print("  ║  Ctrl+C to stop                                     ║")
+    print("  ╚═════════════════════════════════════════════════════╝")
     print()
 
-    await sim.tick_loop()
+    # ── Tick loop with session + profit-target checks ─────────────────────────
+    while True:
+        await asyncio.sleep(2)
+        sim.tick += 1
+        sim._update_equity()
+        sim._maybe_open_close_trade()
+        sim._add_log_line()
+        await state.broadcast()
+
+        # Auto-close at $500 profit
+        daily_pnl = sim.equity - sim.session_start
+        if daily_pnl >= profit_target:
+            state.is_shutdown_today = True
+            state.add_log("INFO",
+                f"🎯 Daily profit target reached: +${daily_pnl:.2f} — session closed")
+            await state.broadcast()
+            print(f"\n  🎯  Profit target hit: +${daily_pnl:.2f} — demo auto-stopped.\n")
+            break
+
+        # Auto-close at session end
+        now_et2 = datetime.now(tz_et)
+        if now_et2.time() >= session_close:
+            state.add_log("INFO",
+                f"⏰ Session end {session_end_et} ET reached — closing")
+            await state.broadcast()
+            print(f"\n  ⏰  Session closed ({session_end_et} ET / "
+                  f"{end_h-3:02d}:{end_m:02d} PST) — demo stopped.\n")
+            break
+
+    dashboard.stop()
 
 
 def main() -> None:

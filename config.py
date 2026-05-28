@@ -91,13 +91,24 @@ DEFAULT_INSTRUMENT = os.getenv("DEFAULT_INSTRUMENT", "MGC").upper()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SESSION / TIMING  (all times in US/Eastern)
+# PST↔ET offset is always 3 hours: 6am PST = 9am ET, 8am PST = 11am ET
 # ═══════════════════════════════════════════════════════════════════════════════
 TIMEZONE = pytz.timezone("America/New_York")
 
-SESSION_START       = time(9, 30)
-SESSION_END         = time(15, 0)
-POSITION_CLOSE_TIME = time(14, 45)
-OPENING_RANGE_END   = time(10, 0)
+def _parse_time(env_key: str, default: str) -> time:
+    """Parse HH:MM env var into a time object."""
+    raw = os.getenv(env_key, default)
+    try:
+        h, m = map(int, raw.split(":"))
+        return time(h, m)
+    except Exception:
+        h, m = map(int, default.split(":"))
+        return time(h, m)
+
+SESSION_START       = _parse_time("SESSION_START_ET", "09:30")
+SESSION_END         = _parse_time("SESSION_END_ET",   "15:00")
+POSITION_CLOSE_TIME = _parse_time("POSITION_CLOSE_ET", "14:45")
+OPENING_RANGE_END   = _parse_time("OPENING_RANGE_END_ET", "10:00")
 
 ENTRY_DELAY_BARS = int(os.getenv("ENTRY_DELAY_BARS", "1"))
 
@@ -136,6 +147,8 @@ TP2_R               = 2.5
 
 DAILY_LOSS_LIMIT_PCT    = float(os.getenv("DAILY_LOSS_LIMIT_PCT",    "0.0085"))
 DAILY_PROFIT_TARGET_PCT = float(os.getenv("DAILY_PROFIT_TARGET_PCT", "0.012"))
+# Fixed-dollar profit target — overrides PCT when > 0 (e.g. 500 = stop at +$500)
+DAILY_PROFIT_TARGET_USD = float(os.getenv("DAILY_PROFIT_TARGET_USD", "0"))
 MAX_TRADES_PER_DAY      = int(os.getenv("MAX_TRADES_PER_DAY", "3"))
 
 MAX_DAY_PROFIT_SHARE        = 0.35
