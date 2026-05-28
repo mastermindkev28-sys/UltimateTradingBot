@@ -116,6 +116,9 @@ class BotState:
     def _snapshot_config() -> dict:
         return {
             "instrument":              config.DEFAULT_INSTRUMENT,
+            "session_start_et":        config.SESSION_START.strftime("%H:%M"),
+            "session_end_et":          config.SESSION_END.strftime("%H:%M"),
+            "daily_profit_target_usd": config.DAILY_PROFIT_TARGET_USD,
             "risk_per_trade_pct":      config.RISK_PER_TRADE_PCT,
             "daily_loss_limit_pct":    config.DAILY_LOSS_LIMIT_PCT,
             "daily_profit_target_pct": config.DAILY_PROFIT_TARGET_PCT,
@@ -219,6 +222,7 @@ class BotState:
         changed = []
         # Mapping: dashboard key → (config attr, type coercion)
         allowed = {
+            "daily_profit_target_usd": ("DAILY_PROFIT_TARGET_USD", float),
             "risk_per_trade_pct":      ("RISK_PER_TRADE_PCT",      float),
             "daily_loss_limit_pct":    ("DAILY_LOSS_LIMIT_PCT",     float),
             "daily_profit_target_pct": ("DAILY_PROFIT_TARGET_PCT",  float),
@@ -234,15 +238,25 @@ class BotState:
             "news_blackout_after_min": ("NEWS_BLACKOUT_AFTER_MIN",  int),
         }
         import config as _c
+        from datetime import time as _time
         for key, value in updates.items():
-            if key not in allowed:
-                continue
-            attr, coerce = allowed[key]
             try:
-                coerced = coerce(value)
-                setattr(_c, attr, coerced)
-                self.live_config[key] = coerced
-                changed.append(key)
+                if key in ("session_start_et", "session_end_et"):
+                    # Parse HH:MM string and update the time object on config
+                    h, m = map(int, str(value).split(":"))
+                    t = _time(h, m)
+                    if key == "session_start_et":
+                        _c.SESSION_START = t
+                    else:
+                        _c.SESSION_END = t
+                    self.live_config[key] = value
+                    changed.append(key)
+                elif key in allowed:
+                    attr, coerce = allowed[key]
+                    coerced = coerce(value)
+                    setattr(_c, attr, coerced)
+                    self.live_config[key] = coerced
+                    changed.append(key)
             except (ValueError, TypeError) as exc:
                 logger.warning("Config update skipped %s=%s: %s", key, value, exc)
         return changed

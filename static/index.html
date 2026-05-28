@@ -349,6 +349,37 @@ input:checked + .slider:before { transform:translateX(17px); background:var(--gr
 <div id="tab-config" class="tab-pane">
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
 
+    <!-- Session & Targets -->
+    <div class="card">
+      <div class="section-title"><i class="fas fa-clock"></i> Session &amp; Targets</div>
+      <div class="cfg-grid">
+        <div class="cfg-field">
+          <label>Session Start (ET) <span style="color:var(--muted);font-size:11px">PST = ET − 3h</span></label>
+          <input type="text" id="cfg-session-start" placeholder="09:00" maxlength="5">
+        </div>
+        <div class="cfg-field">
+          <label>Session End (ET)</label>
+          <input type="text" id="cfg-session-end" placeholder="11:00" maxlength="5">
+        </div>
+        <div class="cfg-field">
+          <label>Daily Profit Target ($) <span style="color:var(--muted);font-size:11px">0 = use %</span></label>
+          <input type="number" id="cfg-pt-usd" step="50" min="0" placeholder="500">
+        </div>
+        <div class="cfg-field">
+          <label>Daily Profit Target (%)</label>
+          <input type="number" id="cfg-pt"   step="0.001" min="0.005" max="0.05" placeholder="0.012">
+        </div>
+        <div class="cfg-field">
+          <label>Daily Loss Limit (%)</label>
+          <input type="number" id="cfg-dl"   step="0.001" min="0.001" max="0.02" placeholder="0.0085">
+        </div>
+        <div class="cfg-field">
+          <label>Max Trades / Day</label>
+          <input type="number" id="cfg-mt"   step="1" min="1" max="10" placeholder="3">
+        </div>
+      </div>
+    </div>
+
     <!-- Risk -->
     <div class="card">
       <div class="section-title"><i class="fas fa-shield-halved"></i> Risk Management</div>
@@ -356,18 +387,6 @@ input:checked + .slider:before { transform:translateX(17px); background:var(--gr
         <div class="cfg-field">
           <label>Risk / Trade (%)</label>
           <input type="number" id="cfg-risk" step="0.001" min="0.001" max="0.004" placeholder="0.003">
-        </div>
-        <div class="cfg-field">
-          <label>Daily Loss Limit (%)</label>
-          <input type="number" id="cfg-dl"   step="0.001" min="0.001" max="0.02" placeholder="0.0085">
-        </div>
-        <div class="cfg-field">
-          <label>Daily Profit Target (%)</label>
-          <input type="number" id="cfg-pt"   step="0.001" min="0.005" max="0.05" placeholder="0.012">
-        </div>
-        <div class="cfg-field">
-          <label>Max Trades / Day</label>
-          <input type="number" id="cfg-mt"   step="1" min="1" max="10" placeholder="3">
         </div>
         <div class="cfg-field">
           <label>SL ATR Multiplier</label>
@@ -842,12 +861,15 @@ function updateChart(curve) {
 
 // ── Config form ───────────────────────────────────────────────────────
 function loadConfigForm(c) {
-  setVal('cfg-risk',      c.risk_per_trade_pct);
-  setVal('cfg-dl',        c.daily_loss_limit_pct);
-  setVal('cfg-pt',        c.daily_profit_target_pct);
-  setVal('cfg-mt',        c.max_trades_per_day);
-  setVal('cfg-sl',        c.sl_atr_default);
-  setVal('cfg-or',        c.or_min_range_points);
+  setVal('cfg-session-start', c.session_start_et);
+  setVal('cfg-session-end',   c.session_end_et);
+  setVal('cfg-pt-usd',        c.daily_profit_target_usd);
+  setVal('cfg-risk',          c.risk_per_trade_pct);
+  setVal('cfg-dl',            c.daily_loss_limit_pct);
+  setVal('cfg-pt',            c.daily_profit_target_pct);
+  setVal('cfg-mt',            c.max_trades_per_day);
+  setVal('cfg-sl',            c.sl_atr_default);
+  setVal('cfg-or',            c.or_min_range_points);
   setVal('cfg-inst',      c.instrument);
   setVal('cfg-nb-before', c.news_blackout_before_min);
   setVal('cfg-nb-after',  c.news_blackout_after_min);
@@ -863,6 +885,9 @@ function setCheck(id, v) { const el = document.getElementById(id); if (el) el.ch
 
 async function saveConfig() {
   const updates = {
+    session_start_et:        document.getElementById('cfg-session-start').value,
+    session_end_et:          document.getElementById('cfg-session-end').value,
+    daily_profit_target_usd: parseFloat(document.getElementById('cfg-pt-usd').value) || 0,
     risk_per_trade_pct:      parseFloat(document.getElementById('cfg-risk').value),
     daily_loss_limit_pct:    parseFloat(document.getElementById('cfg-dl').value),
     daily_profit_target_pct: parseFloat(document.getElementById('cfg-pt').value),
