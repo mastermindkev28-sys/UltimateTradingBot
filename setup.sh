@@ -182,11 +182,12 @@ echo -e "  ${YELLOW}Edit credentials anytime:  nano .env${NC}"
 echo ""
 
 # ── 7. Optionally start now ──────────────────────────────────────────────────
-read -p "  Start the bot now? [y/N]: " START
-if [[ "${START,,}" == "y" ]]; then
+read -p "  Start demo dashboard now? [y/N]: " START
+START_LOWER=$(echo "$START" | tr '[:upper:]' '[:lower:]')
+if [[ "$START_LOWER" == "y" ]]; then
     echo ""
-    echo -e "  ${GREEN}Starting bot … (Ctrl+C to stop)${NC}"
-    echo -e "  ${CYAN}  Dashboard → http://localhost:8088${NC}"
+    echo -e "  ${GREEN}Starting demo dashboard … (Ctrl+C to stop)${NC}"
+    echo -e "  ${CYAN}  Open → http://localhost:8088   Password: demo${NC}"
     echo ""
-    python3 main.py
+    python3 demo.py
 fi
