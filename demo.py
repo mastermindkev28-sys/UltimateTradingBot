@@ -311,16 +311,63 @@ async def _amain() -> None:
     print("  ╚═════════════════════════════════════════════════════╝")
     print()
 
+    import config as _cfg
+    _stop = False
+
+    # Give dashboard a way to trigger stop
+    class _DemoBot:
+        def stop(self): nonlocal _stop; _stop = True
+    state.bot_ref = _DemoBot()
+
     # ── Tick loop with session + profit-target checks ─────────────────────────
-    while True:
+    while not _stop:
         await asyncio.sleep(2)
+
+        # ── Drain command queue (makes dashboard controls work) ───────────────
+        while not state.command_queue.empty():
+            try:
+                cmd = state.command_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            command = cmd.get("_command", "")
+            if command == "pause":
+                state.is_paused = True
+                state.add_log("INFO", "⏸ Bot PAUSED via dashboard")
+                print("  ⏸  Paused")
+            elif command == "resume":
+                state.is_paused = False
+                state.add_log("INFO", "▶️ Bot RESUMED via dashboard")
+                print("  ▶️  Resumed")
+            elif command == "flatten":
+                state.open_trade     = None
+                state.open_positions = []
+                state.add_log("WARNING", "🚨 FLATTEN ALL — operator command")
+                print("  🚨  Flatten all")
+            elif command == "stop":
+                state.add_log("INFO", "🛑 Stop command received")
+                print("  🛑  Stop received — shutting down demo")
+                _stop = True
+
+        if _stop:
+            break
+
+        # Skip simulation ticks while paused (controls still work)
+        if state.is_paused:
+            await state.broadcast()
+            continue
+
         sim.tick += 1
         sim._update_equity()
         sim._maybe_open_close_trade()
         sim._add_log_line()
+
+        # Use live profit target from config (dashboard edits take effect here)
+        profit_target = _cfg.DAILY_PROFIT_TARGET_USD if _cfg.DAILY_PROFIT_TARGET_USD > 0 \
+                        else sim.session_start * _cfg.DAILY_PROFIT_TARGET_PCT
+
         await state.broadcast()
 
-        # Auto-close at $500 profit
+        # Auto-close at profit target
         daily_pnl = sim.equity - sim.session_start
         if daily_pnl >= profit_target:
             state.is_shutdown_today = True
