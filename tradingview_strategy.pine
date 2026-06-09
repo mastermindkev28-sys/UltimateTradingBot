@@ -1,0 +1,329 @@
+// ============================================================================
+// UltimateTradingBot — TradingView Signal Generator  (Pine Script v5)
+// ============================================================================
+// Pairs with: strategy_logic.py (ORB + VWAP MR validation pipeline)
+//
+// SETUP:
+//   1. Add to TradingView chart on MGC1! (Micro Gold Futures), 1-minute bars
+//   2. Set chart timezone to America/New_York
+//   3. Replace WEBHOOK_SECRET below with your .env WEBHOOK_SECRET value
+//   4. Create two alerts (one for ORB, one for VWAP MR) using the JSON
+//      templates in the alert condition — point URL to your server:
+//      http://YOUR_SERVER_IP:8080/webhook
+//
+// FIELDS SENT IN ALERT JSON (all consumed by strategy_logic.py):
+//   action, instrument, price, atr, rsi, adx, vwap, or_high, or_low,
+//   volume, volume_avg, signal_type, ema20, secret
+// ============================================================================
+
+//@version=5
+strategy(
+    title       = "UltimateTradingBot — ORB + VWAP MR",
+    shorttitle  = "UTB_Signals",
+    overlay     = true,
+    margin_long = 0,
+    margin_short= 0,
+    calc_on_every_tick = false,
+    process_orders_on_close = true
+)
+
+// ─── USER INPUTS ─────────────────────────────────────────────────────────────
+var string WEBHOOK_SECRET = input.string(
+    defval  = "REPLACE_WITH_YOUR_WEBHOOK_SECRET",
+    title   = "Webhook Secret",
+    tooltip = "Must match WEBHOOK_SECRET in your .env file"
+)
+
+string INSTRUMENT = input.string(
+    defval  = "MGC",
+    title   = "Instrument",
+    options = ["MGC", "GC"]
+)
+
+// Session inputs (ET — all times in New York timezone)
+int    or_start_hour   = input.int(9,  "OR Start Hour (ET)",   minval=0, maxval=23)
+int    or_start_min    = input.int(0,  "OR Start Min (ET)",    minval=0, maxval=59)
+int    or_end_hour     = input.int(9,  "OR End Hour (ET)",     minval=0, maxval=23)
+int    or_end_min      = input.int(30, "OR End Min (ET)",      minval=0, maxval=59)
+int    session_end_h   = input.int(11, "Session End Hour (ET)",minval=0, maxval=23)
+int    session_end_m   = input.int(0,  "Session End Min (ET)", minval=0, maxval=59)
+
+// Strategy filters
+float  or_min_range    = input.float(1.5, "Min OR Range (pts)",   step=0.1, minval=0.5)
+float  atr_sl_mult     = input.float(1.0, "SL ATR Multiplier",    step=0.1, minval=0.5, maxval=2.0)
+float  vol_mult        = input.float(1.2, "Volume Confirmation ×", step=0.1, minval=1.0)
+int    rsi_period      = input.int(14,    "RSI Period")
+int    adx_period      = input.int(14,    "ADX Period")
+int    ema_period      = input.int(20,    "EMA Period")
+int    atr_period      = input.int(14,    "ATR Period")
+float  vwap_mr_atr_m   = input.float(2.0, "VWAP MR Min Deviation (×ATR)", step=0.1)
+float  adx_max_mr      = input.float(22.0,"VWAP MR Max ADX (trend filter)",step=1.0)
+
+// ─── CORE INDICATORS ─────────────────────────────────────────────────────────
+atr_val   = ta.atr(atr_period)
+rsi_val   = ta.rsi(close, rsi_period)
+ema20     = ta.ema(close, ema_period)
+vol_avg   = ta.sma(volume, 20)
+
+// VWAP (session)
+[vwap_val, _, _] = ta.vwap(hlc3, false, 1)
+
+// ADX (manual — TradingView built-in)
+[diplus, diminus, adx_val] = ta.dmi(adx_period, adx_period)
+
+// ─── SESSION & OR WINDOW DETECTION ───────────────────────────────────────────
+// Detect New York session bars
+ny_session = "0900-1100:23456"   // 9:00–11:00 ET, Mon–Fri
+in_session = not na(time(timeframe.period, ny_session, "America/New_York"))
+
+or_window  = "0900-0930:23456"
+in_or      = not na(time(timeframe.period, or_window, "America/New_York"))
+
+entry_window = "0930-1050:23456"  // After OR, before force-close at 10:50
+in_entry   = not na(time(timeframe.period, entry_window, "America/New_York"))
+
+// ─── OPENING RANGE TRACKER ────────────────────────────────────────────────────
+var float or_high  = na
+var float or_low   = na
+var bool  or_locked = false
+var int   last_day  = na
+
+// Reset at session start each day
+new_day = dayofweek != last_day[1]
+if new_day
+    or_high  := na
+    or_low   := na
+    or_locked := false
+    last_day  := dayofweek
+
+// Build OR during OR window
+if in_or
+    or_high  := na(or_high) ? high : math.max(or_high, high)
+    or_low   := na(or_low)  ? low  : math.min(or_low,  low)
+    or_locked := false
+
+// Lock OR after window closes
+if not in_or and not na(or_high) and not or_locked
+    or_locked := true
+
+or_range = na(or_high) or na(or_low) ? 0.0 : or_high - or_low
+or_valid  = or_locked and or_range >= or_min_range
+
+// ─── ORB SIGNAL CONDITIONS ────────────────────────────────────────────────────
+// Long: price breaks above OR high, confirmed by VWAP, EMA20, RSI, ADX, Volume
+orb_long_cond =
+    or_valid                                    and   // OR locked & wide enough
+    in_entry                                    and   // in entry window
+    close > or_high                             and   // price above OR high
+    close > vwap_val                            and   // above VWAP
+    close > ema20                               and   // above 20 EMA
+    rsi_val > 45 and rsi_val < 55               and   // RSI neutral (not overbought)
+    volume > vol_avg * vol_mult                 and   // volume spike
+    strategy.position_size == 0                       // no open position
+
+// Short: price breaks below OR low, confirmed filters inverted
+orb_short_cond =
+    or_valid                                    and
+    in_entry                                    and
+    close < or_low                              and   // price below OR low
+    close < vwap_val                            and   // below VWAP
+    close < ema20                               and   // below 20 EMA
+    rsi_val > 45 and rsi_val < 55               and   // RSI neutral
+    volume > vol_avg * vol_mult                 and
+    strategy.position_size == 0
+
+// ─── VWAP MEAN REVERSION CONDITIONS ──────────────────────────────────────────
+vwap_deviation = math.abs(close - vwap_val)
+min_deviation  = atr_val * vwap_mr_atr_m
+
+vwap_mr_long_cond =
+    or_locked                                   and   // OR must be done
+    in_entry                                    and
+    close < vwap_val                            and   // price below VWAP
+    vwap_deviation >= min_deviation             and   // stretched far enough
+    adx_val < adx_max_mr                        and   // low ADX = non-trending
+    rsi_val < 45                                and   // oversold
+    strategy.position_size == 0
+
+vwap_mr_short_cond =
+    or_locked                                   and
+    in_entry                                    and
+    close > vwap_val                            and
+    vwap_deviation >= min_deviation             and
+    adx_val < adx_max_mr                        and
+    rsi_val > 55                                and   // overbought
+    strategy.position_size == 0
+
+// ─── SL / TP LEVELS ──────────────────────────────────────────────────────────
+sl_pts  = atr_val * atr_sl_mult
+tp1_pts = sl_pts * 1.5   // 1.5R (original conservative)
+tp2_pts = sl_pts * 2.5   // 2.5R
+
+// ─── STRATEGY ENTRIES (for backtest equity curve) ─────────────────────────────
+if orb_long_cond
+    strategy.entry("ORB Long",  strategy.long)
+    strategy.exit("ORB Long X", "ORB Long",
+        loss  = sl_pts  / syminfo.mintick * syminfo.mintick,
+        limit = close + tp2_pts)
+
+if orb_short_cond
+    strategy.entry("ORB Short", strategy.short)
+    strategy.exit("ORB Short X","ORB Short",
+        loss  = sl_pts  / syminfo.mintick * syminfo.mintick,
+        limit = close - tp2_pts)
+
+if vwap_mr_long_cond
+    strategy.entry("MR Long",  strategy.long)
+    strategy.exit("MR Long X", "MR Long",
+        loss  = sl_pts / syminfo.mintick * syminfo.mintick,
+        limit = vwap_val)   // target: return to VWAP
+
+if vwap_mr_short_cond
+    strategy.entry("MR Short", strategy.short)
+    strategy.exit("MR Short X","MR Short",
+        loss  = sl_pts / syminfo.mintick * syminfo.mintick,
+        limit = vwap_val)
+
+// Force-close at 10:50 ET
+force_close = not in_entry and in_session and strategy.position_size != 0
+if force_close
+    strategy.close_all(comment="Time Stop 10:50 ET")
+
+// ─── ALERT JSON MESSAGES ──────────────────────────────────────────────────────
+// These are the exact payloads strategy_logic.py expects.
+// Use these strings in TradingView alert → "Message" field.
+// Set Webhook URL to: http://YOUR_SERVER_IP:8080/webhook
+
+orb_long_json = '{"secret":"' + WEBHOOK_SECRET + '",' +
+    '"action":"BUY",' +
+    '"instrument":"' + INSTRUMENT + '",' +
+    '"signal_type":"ORB",' +
+    '"price":' + str.tostring(close, "#.##") + ',' +
+    '"atr":'   + str.tostring(atr_val, "#.##") + ',' +
+    '"rsi":'   + str.tostring(rsi_val, "#.#") + ',' +
+    '"adx":'   + str.tostring(adx_val, "#.#") + ',' +
+    '"vwap":'  + str.tostring(vwap_val, "#.##") + ',' +
+    '"or_high":' + str.tostring(or_high, "#.##") + ',' +
+    '"or_low":'  + str.tostring(or_low,  "#.##") + ',' +
+    '"volume":'  + str.tostring(volume, "#") + ',' +
+    '"volume_avg":' + str.tostring(vol_avg, "#") + ',' +
+    '"ema20":'   + str.tostring(ema20, "#.##") + '}'
+
+orb_short_json = '{"secret":"' + WEBHOOK_SECRET + '",' +
+    '"action":"SELL",' +
+    '"instrument":"' + INSTRUMENT + '",' +
+    '"signal_type":"ORB",' +
+    '"price":' + str.tostring(close, "#.##") + ',' +
+    '"atr":'   + str.tostring(atr_val, "#.##") + ',' +
+    '"rsi":'   + str.tostring(rsi_val, "#.#") + ',' +
+    '"adx":'   + str.tostring(adx_val, "#.#") + ',' +
+    '"vwap":'  + str.tostring(vwap_val, "#.##") + ',' +
+    '"or_high":' + str.tostring(or_high, "#.##") + ',' +
+    '"or_low":'  + str.tostring(or_low,  "#.##") + ',' +
+    '"volume":'  + str.tostring(volume, "#") + ',' +
+    '"volume_avg":' + str.tostring(vol_avg, "#") + ',' +
+    '"ema20":'   + str.tostring(ema20, "#.##") + '}'
+
+vwap_mr_long_json = '{"secret":"' + WEBHOOK_SECRET + '",' +
+    '"action":"BUY",' +
+    '"instrument":"' + INSTRUMENT + '",' +
+    '"signal_type":"VWAP_MR",' +
+    '"price":' + str.tostring(close, "#.##") + ',' +
+    '"atr":'   + str.tostring(atr_val, "#.##") + ',' +
+    '"rsi":'   + str.tostring(rsi_val, "#.#") + ',' +
+    '"adx":'   + str.tostring(adx_val, "#.#") + ',' +
+    '"vwap":'  + str.tostring(vwap_val, "#.##") + ',' +
+    '"or_high":' + str.tostring(or_high, "#.##") + ',' +
+    '"or_low":'  + str.tostring(or_low,  "#.##") + ',' +
+    '"volume":'  + str.tostring(volume, "#") + ',' +
+    '"volume_avg":' + str.tostring(vol_avg, "#") + ',' +
+    '"ema20":'   + str.tostring(ema20, "#.##") + '}'
+
+vwap_mr_short_json = '{"secret":"' + WEBHOOK_SECRET + '",' +
+    '"action":"SELL",' +
+    '"instrument":"' + INSTRUMENT + '",' +
+    '"signal_type":"VWAP_MR",' +
+    '"price":' + str.tostring(close, "#.##") + ',' +
+    '"atr":'   + str.tostring(atr_val, "#.##") + ',' +
+    '"rsi":'   + str.tostring(rsi_val, "#.#") + ',' +
+    '"adx":'   + str.tostring(adx_val, "#.#") + ',' +
+    '"vwap":'  + str.tostring(vwap_val, "#.##") + ',' +
+    '"or_high":' + str.tostring(or_high, "#.##") + ',' +
+    '"or_low":'  + str.tostring(or_low,  "#.##") + ',' +
+    '"volume":'  + str.tostring(volume, "#") + ',' +
+    '"volume_avg":' + str.tostring(vol_avg, "#") + ',' +
+    '"ema20":'   + str.tostring(ema20, "#.##") + '}'
+
+// ─── FIRE ALERTS ─────────────────────────────────────────────────────────────
+if orb_long_cond
+    alert(orb_long_json,   alert.freq_once_per_bar_close)
+
+if orb_short_cond
+    alert(orb_short_json,  alert.freq_once_per_bar_close)
+
+if vwap_mr_long_cond
+    alert(vwap_mr_long_json,  alert.freq_once_per_bar_close)
+
+if vwap_mr_short_cond
+    alert(vwap_mr_short_json, alert.freq_once_per_bar_close)
+
+// ─── CHART VISUALS ───────────────────────────────────────────────────────────
+// Opening Range bands
+or_high_line = plot(or_locked ? or_high : na, "OR High", color=color.new(color.green, 30), linewidth=2, style=plot.style_stepline)
+or_low_line  = plot(or_locked ? or_low  : na, "OR Low",  color=color.new(color.red,   30), linewidth=2, style=plot.style_stepline)
+fill(or_high_line, or_low_line, color=color.new(color.gray, 88), title="OR Zone")
+
+// VWAP
+plot(vwap_val, "VWAP", color=color.new(color.orange, 0), linewidth=1)
+
+// EMA 20
+plot(ema20, "EMA 20", color=color.new(color.blue, 40), linewidth=1)
+
+// Signal markers
+plotshape(orb_long_cond,      title="ORB Long",    location=location.belowbar, color=color.lime,   style=shape.triangleup,   size=size.small, text="ORB▲")
+plotshape(orb_short_cond,     title="ORB Short",   location=location.abovebar, color=color.red,    style=shape.triangledown, size=size.small, text="ORB▼")
+plotshape(vwap_mr_long_cond,  title="VWAP MR Long", location=location.belowbar, color=color.aqua,  style=shape.circle,       size=size.small, text="MR▲")
+plotshape(vwap_mr_short_cond, title="VWAP MR Short",location=location.abovebar, color=color.fuchsia,style=shape.circle,      size=size.small, text="MR▼")
+
+// Session background shading
+bgcolor(in_or    ? color.new(color.yellow, 92) : na, title="OR Window")
+bgcolor(in_entry ? color.new(color.green,  96) : na, title="Entry Window")
+
+// ─── INFO TABLE ──────────────────────────────────────────────────────────────
+var table info = table.new(position.top_right, 2, 8,
+    border_width=1, border_color=color.gray,
+    bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    table.cell(info, 0, 0, "OR High",   text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 0, na(or_high) ? "—" : str.tostring(or_high, "#.##"),
+        text_color=color.lime, text_size=size.small)
+
+    table.cell(info, 0, 1, "OR Low",    text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 1, na(or_low) ? "—" : str.tostring(or_low, "#.##"),
+        text_color=color.red, text_size=size.small)
+
+    table.cell(info, 0, 2, "OR Range",  text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 2, or_valid ? str.tostring(or_range, "#.##") + " pts ✓" :
+                                      str.tostring(or_range, "#.##") + " pts ✗",
+        text_color=or_valid ? color.lime : color.gray, text_size=size.small)
+
+    table.cell(info, 0, 3, "ATR",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 3, str.tostring(atr_val, "#.##"),
+        text_color=color.white, text_size=size.small)
+
+    table.cell(info, 0, 4, "RSI",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 4, str.tostring(rsi_val, "#.#"),
+        text_color=rsi_val > 45 and rsi_val < 55 ? color.lime : color.orange, text_size=size.small)
+
+    table.cell(info, 0, 5, "ADX",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 5, str.tostring(adx_val, "#.#"),
+        text_color=adx_val < adx_max_mr ? color.lime : color.orange, text_size=size.small)
+
+    table.cell(info, 0, 6, "VWAP",      text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 6, str.tostring(vwap_val, "#.##"),
+        text_color=color.orange, text_size=size.small)
+
+    table.cell(info, 0, 7, "Vol/Avg",   text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 7, str.tostring(math.round(volume / vol_avg * 100) / 100) + "×",
+        text_color=volume > vol_avg * vol_mult ? color.lime : color.gray, text_size=size.small)
