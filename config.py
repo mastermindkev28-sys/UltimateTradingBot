@@ -245,8 +245,8 @@ PROP_FIRM_PRESETS: Dict[str, dict] = {
     "topstep_150k": {"account_size": 150000, "max_daily_loss": 3000,  "trailing_dd": 4500,  "profit_target": 9000},
     "mff_50k":      {"account_size": 50000,  "max_daily_loss": 1250,  "trailing_dd": 2500,  "profit_target": 3000},
     "mff_100k":     {"account_size": 100000, "max_daily_loss": 2500,  "trailing_dd": 5000,  "profit_target": 6000},
-    "lucid_50k":    {"account_size": 50000,  "max_daily_loss": 1000,  "trailing_dd": 2500,  "profit_target": 3000},
-    "lucid_100k":   {"account_size": 100000, "max_daily_loss": 2000,  "trailing_dd": 5000,  "profit_target": 6000},
+    "lucid_50k":    {"account_size": 50000,  "max_daily_loss": 1000,  "trailing_dd": 2000,  "profit_target": 3000},
+    "lucid_100k":   {"account_size": 100000, "max_daily_loss": 2000,  "trailing_dd": 4000,  "profit_target": 6000},
 }
 PROP_FIRM = os.getenv("PROP_FIRM", "topstep_50k")
 
